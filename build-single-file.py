@@ -6,7 +6,9 @@ vendor/ libraries as separate files. This script inlines all of them so the
 editor can be shared or downloaded as a single file and opened by
 double-clicking it.
 
-qpdf (password support) is built in too, so the file works offline.
+qpdf (password support) is built in too. Text recognition (OCR) downloads its
+engine from the jsDelivr CDN the first time it's used (internet needed once);
+the desktop app includes everything offline.
 
 The pdf.js worker is inlined as a normal script. pdf.js notices it
 (window.pdfjsWorker) and does its work on the page itself instead of in a
@@ -46,6 +48,11 @@ for src in scripts:
     if src == "vendor/pdf.min.js":
         # Load the worker code on the page, right after pdf.js itself.
         replacement += "\n" + inline_script("vendor/pdf.worker.min.js")
+    if src == "ocr.js":
+        # The OCR loader is built in; the engine and languages (about 15 MB)
+        # come from the jsDelivr CDN on first use, since a page opened from
+        # disk can't load them from files. The desktop app has them built in.
+        replacement = inline_script("vendor/ocr/tesseract.min.js") + "\n" + replacement
     if src == "security.js":
         # Password support normally loads qpdf on first use; build it in here.
         replacement = inline_script("vendor/qpdf.js") + "\n" + inline_script("vendor/qpdf-wasm.js") + "\n" + replacement

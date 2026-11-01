@@ -25,6 +25,7 @@
       </span>
       <button class="btn" id="passwordBtn" disabled title="Protect the downloaded PDF with a password">Password</button>
       <button class="btn primary" id="saveBtn" disabled title="Download the edited PDF (Ctrl+S)">Download</button>
+      <button class="btn" id="ocrBtn" disabled title="Recognize the text in scanned pages (OCR), so the PDF can be searched, copied and converted">Recognize text</button>
       <button class="btn primary" id="convertBtn" disabled title="Convert to Word, Excel or OpenDocument">Convert</button>
     </div>
 
@@ -144,6 +145,32 @@
     </form>
   </dialog>
 
+  <!-- Recognize text (OCR) -->
+  <dialog id="ocrDialog">
+    <form method="dialog" novalidate>
+      <h2>Recognize text (OCR)</h2>
+      <p class="muted" id="ocrInfo"></p>
+      <fieldset>
+        <legend>Languages in this document</legend>
+        <div id="ocrLangs" class="lang-list"></div>
+      </fieldset>
+      <p class="muted small-note">Tick only the languages the document uses: each extra one makes recognition slower and can add mistakes.</p>
+      <p class="error" id="ocrError" aria-live="polite"></p>
+      <div class="dialog-buttons">
+        <button type="button" data-close>Cancel</button>
+        <button type="submit" class="primary">Recognize</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Progress for long jobs -->
+  <dialog id="progressDialog">
+    <h2 id="progressTitle">Working…</h2>
+    <progress id="progressBar" max="1" value="0"></progress>
+    <p class="muted" id="progressText"></p>
+    <div class="dialog-buttons"><button type="button" id="progressStop">Stop</button></div>
+  </dialog>
+
   <!-- Password for downloads -->
   <dialog id="passwordDialog">
     <form method="dialog" novalidate>
@@ -181,6 +208,7 @@
   <script src="vendor/pdf.min.js"></script>
   <script src="vendor/pdf-lib.min.js"></script>
   <script src="convert.js"></script>
+  <script src="ocr.js"></script>
   <script src="security.js"></script>
   <script src="signature.js"></script>
   <script src="app.js"></script>

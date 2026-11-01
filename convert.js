@@ -27,6 +27,11 @@
   const apply = (m, x, y) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
   const hex = (c) => c.map((v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('').toUpperCase();
   const RENDER_SCALE = 2; // page picture used to read colours
+  // Chinese/Japanese characters and full-width punctuation: written without spaces.
+  const CJK = '\u2e80-\u2fdf\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef';
+  const isCJK = (ch) => !!ch && new RegExp(`[${CJK}]`).test(ch);
+  const CJK_SPACES = new RegExp(`([${CJK}])\\s+(?=[${CJK}])`, 'g');
+  const CJK_FONT = 'Microsoft YaHei';
 
   // Font family, bold and italic from the embedded font's name,
   // e.g. "ABCDEF+TimesNewRomanPS-BoldItalicMT" → Times New Roman, bold, italic.
@@ -194,7 +199,8 @@
       if (size < 1) continue;
       const w = (it.width * Math.hypot(m[0], m[1])) / len;
       const x = m[4], y = m[5];
-      const font = fontInfo(page, it.fontName, tc.styles[it.fontName], fonts);
+      let font = fontInfo(page, it.fontName, tc.styles[it.fontName], fonts);
+      if (/glyph\s*less/i.test(font.family)) font = { ...font, family: [...it.str].some(isCJK) ? CJK_FONT : 'Arial' };
       const col = sampleColors(px, canvas.width, canvas.height, x, y - size * 0.8, x + w, y + size * 0.2);
       items.push({ str: it.str, x, y, w, size, ...font, color: col.fg, bg: col.bg });
     }
@@ -211,6 +217,7 @@
   const sameStyle = (p, q) => p.family === q.family && p.bold === q.bold && p.italic === q.italic &&
     Math.abs(p.size - q.size) < 0.6 && p.color === q.color;
   const isWhite = (bg) => !bg || parseInt(bg.slice(0, 2), 16) + parseInt(bg.slice(2, 4), 16) + parseInt(bg.slice(4, 6), 16) > 735;
+  const colorDistance = (a, b) => Math.hypot(...[0, 2, 4].map((k) => parseInt(a.slice(k, k + 2), 16) - parseInt(b.slice(k, k + 2), 16)));
   const plain = (runs) => runs.map((r) => r.text).join('');
 
   function buildLines(items) {
@@ -234,7 +241,7 @@
         if (!cell || gap > Math.max(line.size * 1.2, 9)) {
           cell = { x0: it.x, x1: it.x + it.w, runs: [] };
           line.cells.push(cell);
-        } else if (gap > Math.min(prev.size, it.size) * 0.15 && !/\s$/.test(prev.str) && !/^\s/.test(it.str)) {
+        } else if (gap > Math.min(prev.size, it.size) * 0.15 && !/\s$/.test(prev.str) && !/^\s/.test(it.str) && !(isCJK(prev.str.slice(-1)) && isCJK(it.str[0]))) {
           addText(cell.runs, ' ', prev);
         }
         addText(cell.runs, it.str, it);
@@ -242,7 +249,7 @@
         prev = it;
       }
       for (const c of line.cells) {
-        c.runs = c.runs.map((r) => ({ ...r, text: r.text.replace(/\s+/g, ' ') }));
+        c.runs = c.runs.map((r) => ({ ...r, text: r.text.replace(/\s+/g, ' ').replace(CJK_SPACES, '$1') }));
         if (c.runs.length) { c.runs[0].text = c.runs[0].text.replace(/^ /, ''); const l = c.runs[c.runs.length - 1]; l.text = l.text.replace(/ $/, ''); }
         c.runs = c.runs.filter((r) => r.text);
         c.bg = line.items.find((it) => it.x >= c.x0 - 0.5)?.bg;
@@ -312,8 +319,8 @@
         const next = lines[j + 1], cur = lines[j];
         const gap = next.y - cur.y;
         if (gap > Math.max(cur.size, next.size) * 3) break;
-        if (Math.abs(next.size - cur.size) > cur.size * 0.15) break; // e.g. a heading
         if (isRow(next)) { j++; continue; }
+        if (Math.abs(next.size - cur.size) > cur.size * 0.15) break; // e.g. a heading
         // A row with one filled cell can still belong to the table, if it
         // lines up with a column of the next row.
         const after = lines[j + 2];
@@ -415,16 +422,24 @@
       blocks.push(im);
     }
     blocks.sort((p, q) => p.top - q.top);
-    return { width: pg.width, height: pg.height, blocks, textLeft, textRight, lines, bg: isWhite(pageBg) ? null : pageBg };
+    // paper: the page's actual background (e.g. slightly grey on scans); bg: only if it's a real colour.
+    return { width: pg.width, height: pg.height, blocks, textLeft, textRight, lines, paper: pageBg, bg: isWhite(pageBg) ? null : pageBg };
   }
 
   // Bullets drawn with Symbol/Wingdings fonts use private character codes.
   const SYMBOL_BULLETS = { '\uf0b7': '•', '\uf0a7': '▪', '\uf0a8': '▪', '\uf06e': '■', '\uf076': '❖', '\uf0d8': '➢', '\uf0fc': '✓', '\uf0e0': '•', '\uf02d': '–' };
   const BULLET_RE = /^([•●○◦▪▫■□‣⁃–\-*·❖➢✓\uf0b7\uf0a7\uf0a8\uf06e\uf076\uf0d8\uf0fc\uf0e0\uf02d]|\d{1,3}[.)]|[a-zA-Z][.)]|\(\w{1,3}\))$/;
 
+  // Text recognition (OCR) often reads a round bullet as one of these letters.
+  const MISREAD_BULLET = /^[eoO°©®«*]$/;
+
   // "•  Text", "1.  Text", "a)  Text" → a list item.
   function listMarker(line) {
     const first = plain(line.cells[0].runs).trim();
+    if (line.cells.length === 2 && MISREAD_BULLET.test(first) && /^\p{L}/u.test(plain(line.cells[1].runs).trim()) &&
+      line.cells[1].x0 - line.cells[0].x1 < line.size * 4) {
+      return { marker: '•', markerX: line.cells[0].x0, textX: line.cells[1].x0 };
+    }
     if (line.cells.length >= 2 && BULLET_RE.test(first) && line.cells[1].x0 - line.cells[0].x1 < line.size * 4) {
       return { marker: SYMBOL_BULLETS[first] || first, markerX: line.cells[0].x0, textX: line.cells[1].x0 };
     }
@@ -451,6 +466,7 @@
         if (i > 0 && k === 0 && runs.length) {
           const last = runs[runs.length - 1];
           if (/[a-z]-$/.test(last.text) && /^[a-z]/.test(cr[0].text)) last.text = last.text.slice(0, -1);
+          else if (isCJK(last.text.slice(-1)) && isCJK(cr[0].text[0])) { /* Chinese lines join without a space */ }
           else if (!/\s$/.test(last.text)) last.text += ' ';
         }
         for (const r of cr) { const last = runs[runs.length - 1]; if (last && sameStyle(last, r)) last.text += r.text; else runs.push(r); }
@@ -571,18 +587,18 @@
       if (b.type === 'table') {
         for (const r of b.rows) {
           const row = [];
-          r.cells.forEach((c, k) => { if (c) row[k] = cellOf(c.runs, c.bg); });
+          r.cells.forEach((c, k) => { if (c) row[k] = cellOf(c.runs, c.bg, page.paper); });
           rows.push(row);
         }
       } else {
-        rows.push([cellOf(b.runs.map((r) => ({ ...r, text: r.text.replace(/\t/g, '  ') })), b.bg)]);
+        rows.push([cellOf(b.runs.map((r) => ({ ...r, text: r.text.replace(/\t/g, '  ') })), b.bg, page.paper)]);
       }
       lastBottom = b.bottom;
     }
     return rows;
   }
 
-  function cellOf(runs, bg) {
+  function cellOf(runs, bg, paper) {
     const text = plain(runs).trim();
     const num = parseNumber(text);
     const main = runs.reduce((m, r) => (r.text.length > (m ? m.text.length : -1) ? r : m), null) || {};
@@ -591,7 +607,7 @@
       bold: runs.length > 0 && runs.every((r) => r.bold || !r.text.trim()),
       italic: runs.length > 0 && runs.every((r) => r.italic || !r.text.trim()),
       color: main.color && main.color !== '000000' && !/^(0[0-9A-F]){3}$/.test(main.color) ? main.color : null,
-      bg: bg && !isWhite(bg) ? bg : null,
+      bg: shade(bg, paper),
     };
   }
 
@@ -615,7 +631,8 @@
   }
 
   // Shading for a paragraph or cell, unless it's just the page colour.
-  const shade = (bg, pageBg) => (bg && !isWhite(bg) && bg !== pageBg ? bg : null);
+  // Shading for a paragraph or cell, unless it's (nearly) the page's own colour.
+  const shade = (bg, paper) => (bg && !isWhite(bg) && (!paper || colorDistance(bg, paper) > 24) ? bg : null);
 
   // ---------- Word (.docx) ----------
   function toDocx(doc) {
@@ -624,7 +641,7 @@
     const g = pageGeometry(doc.pages[0]);
     // Word has one page colour per document: use it when all pages agree.
     const docBg = doc.pages.every((p) => p.bg && p.bg === doc.pages[0].bg) ? doc.pages[0].bg : null;
-    const rPr = (r) => `<w:rPr><w:rFonts w:ascii="${xml(r.family)}" w:hAnsi="${xml(r.family)}" w:cs="${xml(r.family)}"/>` +
+    const rPr = (r) => `<w:rPr><w:rFonts w:ascii="${xml(r.family)}" w:hAnsi="${xml(r.family)}" w:cs="${xml(r.family)}" w:eastAsia="${xml([...r.text].some(isCJK) ? (r.family === 'Arial' ? CJK_FONT : r.family) : CJK_FONT)}"/>` +
       (r.bold ? '<w:b/>' : '') + (r.italic ? '<w:i/>' : '') +
       (r.color && r.color !== '000000' ? `<w:color w:val="${r.color}"/>` : '') +
       `<w:sz w:val="${Math.round(r.size * 2)}"/><w:szCs w:val="${Math.round(r.size * 2)}"/></w:rPr>`;
@@ -651,7 +668,7 @@
           let runs = b.runs;
           if (b.bullet) runs = [{ ...b.runs[0], text: b.bullet.marker + '\t' }, ...b.runs];
           body.push(pXml({ runs, align: b.align, indent: b.indent, firstLine: b.firstLine, hanging: b.hanging, before: pageBreak ? 0 : before,
-            line: b.lineSpacing, bg: shade(b.bg, docBg), pageBreak, outline: lvl, tab: b.bullet ? b.indent : null }));
+            line: b.lineSpacing, bg: docBg ? shade(b.bg, docBg) : shade(b.bg, page.paper), pageBreak, outline: lvl, tab: b.bullet ? b.indent : null }));
         } else if (b.type === 'image') {
           media.push(b);
           const n = media.length;
@@ -669,7 +686,7 @@
           body.push(pXml({ align: centered ? 'center' : 'left', indent: centered ? 0 : Math.max(0, b.x0 - geo.left), before: pageBreak ? 0 : before, pageBreak, inner: drawing }));
         } else if (b.type === 'table') {
           if (pageBreak || before > 2) body.push(pXml({ runs: [], before: pageBreak ? 0 : Math.max(0, before - 12), pageBreak, line: 0.5 }));
-          body.push(tableDocx(b, geo, runXml, pXml, docBg));
+          body.push(tableDocx(b, geo, runXml, pXml, docBg || page.paper));
         }
         prevBottom = b.bottom;
       });
@@ -756,7 +773,9 @@
     }
     textProps(r) {
       this.fonts.add(r.family);
-      return `<style:text-properties style:font-name="${xml(r.family)}" fo:font-size="${+r.size.toFixed(1)}pt"` +
+      const asian = [...r.text].some(isCJK) ? r.family : CJK_FONT;
+      this.fonts.add(asian);
+      return `<style:text-properties style:font-name="${xml(r.family)}" style:font-name-asian="${xml(asian)}" style:font-size-asian="${+r.size.toFixed(1)}pt" fo:font-size="${+r.size.toFixed(1)}pt"` +
         (r.bold ? ' fo:font-weight="bold" style:font-weight-asian="bold" style:font-weight-complex="bold"' : '') +
         (r.italic ? ' fo:font-style="italic" style:font-style-asian="italic" style:font-style-complex="italic"' : '') +
         (r.color && r.color !== '000000' ? ` fo:color="#${r.color}"` : '') + '/>';
@@ -805,7 +824,7 @@
           const lvl = headingLevel(b, doc.body);
           let runs = b.runs;
           if (b.bullet) runs = [{ ...b.runs[0], text: b.bullet.marker + '\t' }, ...b.runs];
-          const ps = pStyle({ align: b.align, indent: b.indent, firstLine: b.firstLine, hanging: b.hanging, before, line: b.lineSpacing, bg: shade(b.bg, page.bg), master, tab: b.bullet ? 0 : null });
+          const ps = pStyle({ align: b.align, indent: b.indent, firstLine: b.firstLine, hanging: b.hanging, before, line: b.lineSpacing, bg: shade(b.bg, page.paper), master, tab: b.bullet ? 0 : null });
           out.push(lvl ? `<text:h text:style-name="${ps}" text:outline-level="${lvl}">${spans(runs)}</text:h>` : `<text:p text:style-name="${ps}">${spans(runs)}</text:p>`);
         } else if (b.type === 'image') {
           media.push(b);
@@ -822,7 +841,7 @@
           const ts = st.get('Tbl', 'table', `<style:table-properties style:width="${widths.reduce((s, w) => s + w, 0).toFixed(1)}pt" fo:margin-left="${Math.max(0, b.x0 - geo.left - 6).toFixed(1)}pt" table:align="left"/>`);
           const cols = widths.map((w) => `<table:table-column table:style-name="${st.get('Col', 'table-column', `<style:table-column-properties style:column-width="${w.toFixed(1)}pt"/>`)}"/>`).join('');
           const rows = b.rows.map((r) => `<table:table-row table:style-name="${st.get('Row', 'table-row', `<style:table-row-properties style:min-row-height="${r.height.toFixed(1)}pt"/>`)}">` + r.cells.map((c, k) => {
-            const bg = c ? shade(c.bg, page.bg) : null;
+            const bg = c ? shade(c.bg, page.paper) : null;
             const right = c && parseNumber(plain(c.runs)) && c.x1 > b.cols[k][1] - 2 && c.x0 > b.cols[k][0] + 2;
             const cs = st.get('Cell', 'table-cell', `<style:table-cell-properties fo:padding-top="0.5pt" fo:padding-bottom="0.5pt" fo:padding-left="4pt" fo:padding-right="4pt" fo:border="${b.borders ? '0.5pt solid #000000' : 'none'}"${bg ? ` fo:background-color="#${bg}"` : ''}/>`);
             const ps = pStyle({ align: right ? 'right' : 'left' });

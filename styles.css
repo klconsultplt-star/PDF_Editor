@@ -227,6 +227,11 @@ button.link { all: unset; color: var(--accent); cursor: pointer; text-decoration
 .field.inline { width: 160px; height: 32px; margin: 0 0 0 4px; }
 .check[hidden] { display: none; }
 
+/* ---------- OCR ---------- */
+.lang-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 2px 12px; }
+#progressDialog progress { width: 100%; height: 14px; margin: 8px 0; }
+.btn.attention { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(37, 99, 235, .25); }
+
 /* ---------- Signature dialog ---------- */
 .sign-dialog { width: min(620px, calc(100vw - 32px)); }
 .sign-dialog .tabs { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }

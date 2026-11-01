@@ -53,6 +53,9 @@
   let pendingStamp = null;   // signature waiting to be placed: { imageId, w, h }
   let hoverChunk = null;     // existing text under the mouse in "Edit text" mode
   const chunkCache = new Map(); // "src:page" -> text chunks of an original page
+  // Recognised text (OCR) per page id: { pdf: invisible text layer, rotation, langs }.
+  // Kept outside the undo history; page ids survive undo/redo.
+  const ocrLayers = new Map();
 
   // ---------- DOM ----------
   const $ = (id) => document.getElementById(id);
@@ -298,17 +301,22 @@
       loaded.pages.forEach((p) => { p.src = 0; });
       images.clear();
       chunkCache.clear();
+      ocrLayers.clear();
       pages = loaded.pages;
       fileName = file.name;
+      document.title = file.name + ' – PDF Editor';
       savePassword = loaded.password; // a locked file stays locked when downloaded
       updatePasswordButton();
       undoStack = []; redoStack = []; dirty = false; selection = null;
       zoom = fitZoom();
       renderAll();
       const n = `${pages.length} page${pages.length === 1 ? '' : 's'}`;
+      const scanned = pages.filter(needsOcr).length;
       status(loaded.password
         ? `Opened ${file.name} (${n}). It's password protected: the downloaded copy keeps the same password (change it with the Password button).`
-        : `Opened ${file.name} (${n})`, loaded.password ? 7000 : 2500);
+        : scanned
+          ? `Opened ${file.name} (${n}). ${scanned === pages.length ? 'It is scanned' : scanned + ' page' + (scanned === 1 ? ' is' : 's are') + ' scanned'}: click Recognize text to make it searchable and convertible.`
+          : `Opened ${file.name} (${n})`, loaded.password || scanned ? 7000 : 2500);
     } catch (err) {
       if (err instanceof Cancelled) return status('Opening cancelled');
       console.error(err);
@@ -338,7 +346,9 @@
     images.clear();
     pages = [{ id: uid(), src: null, srcPage: 0, rotation: 0, view: BLANK_SIZE.slice(), annots: [] }];
     fileName = 'document.pdf';
+    document.title = 'PDF Editor';
     chunkCache.clear();
+    ocrLayers.clear();
     savePassword = '';
     updatePasswordButton();
     undoStack = []; redoStack = []; dirty = false; selection = null;
@@ -1305,6 +1315,8 @@
         p = out.addPage(copied.get(page.src + ':' + page.srcPage));
       }
       p.setRotation(degrees(page.rotation));
+      const layer = ocrLayers.get(page.id);
+      if (layer) await addTextLayer(out, p, page, layer);
 
       for (const a of page.annots) {
         if (skipWatermarks && a.watermark) continue;
@@ -1343,6 +1355,27 @@
     return out.save();
   }
 
+  // Place a recognised-text layer back onto the page. The layer was made for
+  // the page as it was shown (rotated by layer.rotation) and straightened by
+  // layer.tilt degrees, so: scale it to the page, tilt it back around the
+  // centre, then turn it from "as shown" into the page's own coordinates.
+  async function addTextLayer(out, p, page, layer) {
+    const { pushGraphicsState, popGraphicsState, concatTransformationMatrix, drawObject } = PDFLib;
+    const emb = (await out.embedPdf(layer.pdf, [0]))[0];
+    const [x0, y0, x1, y1] = page.view;
+    const W = x1 - x0, H = y1 - y0, R = layer.rotation;
+    const dw = R % 180 ? H : W, dh = R % 180 ? W : H; // size as shown
+    const mul = (m, n) => [m[0] * n[0] + m[2] * n[1], m[1] * n[0] + m[3] * n[1], m[0] * n[2] + m[2] * n[3],
+      m[1] * n[2] + m[3] * n[3], m[0] * n[4] + m[2] * n[5] + m[4], m[1] * n[4] + m[3] * n[5] + m[5]];
+    const toPage = { 0: [1, 0, 0, 1, x0, y0], 90: [0, 1, -1, 0, x0 + W, y0], 180: [-1, 0, 0, -1, x0 + W, y0 + H], 270: [0, -1, 1, 0, x0, y0 + H] }[R];
+    const a = (-(layer.tilt || 0) * Math.PI) / 180, c = Math.cos(a), s = Math.sin(a); // undo the straightening
+    const tiltBack = mul(mul([1, 0, 0, 1, dw / 2, dh / 2], [c, s, -s, c, 0, 0]), [1, 0, 0, 1, -dw / 2, -dh / 2]);
+    const scale = [dw / emb.width, 0, 0, dh / emb.height, 0, 0];
+    const m = mul(mul(toPage, tiltBack), scale);
+    const name = p.node.newXObject('OcrText', emb.ref); // pdf-lib writes the layer into the file when saving
+    p.pushOperators(pushGraphicsState(), concatTransformationMatrix(...m), drawObject(name), popGraphicsState());
+  }
+
   function downloadBlob(blob, name) {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -1354,6 +1387,8 @@
   }
 
   const baseName = () => fileName.replace(/\.pdf$/i, '');
+  // The desktop app asks where to save; the browser downloads straight away.
+  const DONE = window.desktop ? 'Ready to save' : 'Downloaded';
 
   // Lock the file if a password is set.
   const protect = async (bytes) => (savePassword ? PdfSecurity.encrypt(bytes, savePassword) : bytes);
@@ -1364,8 +1399,8 @@
     try {
       const bytes = await protect(await buildPdf());
       downloadBlob(new Blob([bytes], { type: 'application/pdf' }), baseName() + '-edited.pdf');
-      dirty = false;
-      status('Downloaded ' + baseName() + '-edited.pdf' + (savePassword ? ' (password protected)' : ''));
+      if (!window.desktop) dirty = false;
+      status(DONE + ' ' + baseName() + '-edited.pdf' + (savePassword ? ' (password protected)' : ''));
     } catch (err) {
       console.error(err);
       status('Could not save: ' + (err.message || err), 6000);
@@ -1375,17 +1410,27 @@
   // ---------- Convert to Word / Excel / OpenDocument ----------
   // Only possible when the PDF has real text. Scanned PDFs (pictures of
   // text) and documents made only of blank pages have none.
-  const hasText = () => pages.some((p) => p.src != null && sources[p.src].textPages.has(p.srcPage));
-  const NO_TEXT = 'Converting needs a PDF with real text. This one has none (for example, a scanned PDF, where the text is a picture).';
+  // A page needs OCR when it comes from a PDF but has no real text (a scan)
+  // and hasn't been recognised yet.
+  const needsOcr = (p) => p.src != null && !sources[p.src].textPages.has(p.srcPage) && !ocrLayers.has(p.id);
+  const hasText = () => pages.some((p) => (p.src != null && sources[p.src].textPages.has(p.srcPage)) || ocrLayers.has(p.id));
+  const NO_TEXT = 'Converting needs a PDF with text. This one has none: if it is scanned, click Recognize text first.';
 
   function updateConvertButton() {
     const btn = $('convertBtn');
-    btn.disabled = !hasText();
-    btn.title = !pages.length || hasText() ? 'Convert to Word, Excel or OpenDocument' : NO_TEXT;
+    const scanned = pages.filter(needsOcr).length;
+    btn.disabled = !hasText() && !scanned;
+    btn.title = !pages.length || hasText() || scanned ? 'Convert to Word, Excel or OpenDocument' : NO_TEXT;
+    const ocr = $('ocrBtn');
+    ocr.disabled = !scanned;
+    ocr.textContent = scanned || !pages.some((p) => ocrLayers.has(p.id)) ? 'Recognize text' : '✓ Text recognized';
+    ocr.classList.toggle('attention', scanned > 0 && !hasText());
   }
 
   function openConvertDialog() {
     if (!pages.length) return;
+    // Scanned pages are recognised first, then the Convert dialog opens.
+    if (pages.some(needsOcr)) return openOcrDialog(openConvertDialog, 'This PDF is scanned, so its text needs to be recognized before converting.');
     if (!hasText()) return status(NO_TEXT, 6000);
     closeTextEditor();
     $('convertError').textContent = '';
@@ -1436,7 +1481,7 @@
       });
       const name = baseName() + '.' + format;
       downloadBlob(blob, name);
-      status('Downloaded ' + name, 4000);
+      status(DONE + ' ' + name, 4000);
     } catch (err) {
       console.error(err);
       status(err.code === 'no-text' ? NO_TEXT : 'Could not convert: ' + (err.message || err), 6000);
@@ -1445,6 +1490,100 @@
 
   // Kept for scripts and tests: convert all pages straight away.
   const exportAs = (format) => convertTo(format);
+
+  // ---------- Recognize text (OCR) ----------
+  const OCR_LANGS_KEY = 'pdfEditor.ocrLanguages';
+  let afterOcr = null;
+
+  function openOcrDialog(then = null, note = '') {
+    const todo = pages.filter(needsOcr);
+    if (!todo.length) return then ? then() : status('There are no scanned pages to recognize.');
+    closeTextEditor();
+    afterOcr = then;
+    let chosen;
+    try { chosen = JSON.parse(localStorage.getItem(OCR_LANGS_KEY) || 'null'); } catch { chosen = null; }
+    if (!Array.isArray(chosen) || !chosen.length) chosen = ['eng', 'msa'];
+    $('ocrLangs').innerHTML = PdfOcr.LANGUAGES.map((l) =>
+      `<label class="check"><input type="checkbox" name="ocrLang" value="${l.code}"${chosen.includes(l.code) ? ' checked' : ''}> ${l.label}</label>`).join('');
+    $('ocrInfo').textContent = (note ? note + ' ' : '') +
+      `${todo.length} scanned page${todo.length === 1 ? '' : 's'} to recognize. The text is added invisibly behind the scan, so the PDF becomes searchable and can be converted to Word or Excel.`;
+    $('ocrError').textContent = '';
+    $('ocrDialog').showModal();
+  }
+
+  async function runOcr() {
+    const langs = [...$('ocrDialog').querySelectorAll('input[name=ocrLang]:checked')].map((c) => c.value);
+    if (!langs.length) { $('ocrError').textContent = 'Choose at least one language.'; return; }
+    try { localStorage.setItem(OCR_LANGS_KEY, JSON.stringify(langs)); } catch {}
+    $('ocrDialog').close();
+    const todo = pages.filter(needsOcr);
+    let stop = false, done = 0, lowConfidence = 0;
+    const progress = showProgress('Recognizing text', () => { stop = true; });
+    try {
+      for (const page of todo) {
+        if (stop) break;
+        const label = `Page ${pages.indexOf(page) + 1} (${done + 1} of ${todo.length})`;
+        progress(done / todo.length, label + ': preparing…');
+        const canvas = await renderForOcr(page);
+        const res = await PdfOcr.recognize(canvas, {
+          langs,
+          onProgress: (p) => progress((done + p) / todo.length, `${label}: ${Math.round(p * 100)}%`),
+        });
+        ocrLayers.set(page.id, { pdf: res.pdf, rotation: page.rotation, tilt: res.tilt, langs });
+        if (res.confidence < 60) lowConfidence++;
+        done++;
+      }
+    } catch (err) {
+      console.error(err);
+      closeProgress();
+      return status('Text recognition failed: ' + (err.message || err), 8000);
+    } finally {
+      PdfOcr.release();
+    }
+    closeProgress();
+    if (done) dirty = true;
+    updateButtons();
+    const msg = stop
+      ? `Stopped after ${done} of ${todo.length} pages. Click Recognize text to continue.`
+      : `Text recognized on ${done} page${done === 1 ? '' : 's'}. ${window.desktop ? 'Save' : 'Download'} it to get a searchable PDF, or Convert it to Word or Excel.` +
+        (lowConfidence ? ` ${lowConfidence} page${lowConfidence === 1 ? ' was' : 's were'} hard to read, so check the result.` : '');
+    status(msg, 8000);
+    const then = afterOcr;
+    afterOcr = null;
+    if (then && !stop && done) then();
+  }
+
+  // The page as shown (with its rotation), at about 300 DPI.
+  async function renderForOcr(page) {
+    const p = await getPdfjsPage(sources[page.src], page.srcPage);
+    let scale = PdfOcr.DPI / 72;
+    const base = p.getViewport({ scale: 1, rotation: page.rotation });
+    scale = Math.min(scale, PdfOcr.MAX_SIDE / Math.max(base.width, base.height));
+    const vp = p.getViewport({ scale, rotation: page.rotation });
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(vp.width);
+    canvas.height = Math.round(vp.height);
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    await p.render({ canvasContext: ctx, viewport: vp }).promise;
+    return canvas;
+  }
+
+  // A progress window; returns update(fraction, text). onStop is called by the Stop button.
+  function showProgress(title, onStop) {
+    $('progressTitle').textContent = title;
+    $('progressBar').value = 0;
+    $('progressText').textContent = '';
+    $('progressStop').disabled = false;
+    $('progressStop').onclick = () => { $('progressStop').disabled = true; $('progressText').textContent = 'Stopping after this page…'; onStop(); };
+    if (!$('progressDialog').open) $('progressDialog').showModal();
+    return (fraction, text) => {
+      $('progressBar').value = Math.max(0, Math.min(1, fraction));
+      if (!$('progressStop').disabled) $('progressText').textContent = text;
+    };
+  }
+  const closeProgress = () => { if ($('progressDialog').open) $('progressDialog').close(); };
 
   // ---------- Split / extract pages ----------
   // "1-3, 5, 8-" -> [0, 1, 2, 4, 7, …]; throws a readable message if invalid.
@@ -1487,7 +1626,7 @@
         const bytes = await protect(await buildPdf({ list: idx.map((i) => pages[i]) }));
         const name = `${base}-pages-${label}.pdf`;
         downloadBlob(new Blob([bytes], { type: 'application/pdf' }), name);
-        status(`Downloaded ${name} (${idx.length} page${idx.length === 1 ? '' : 's'})`);
+        status(`${DONE} ${name} (${idx.length} page${idx.length === 1 ? '' : 's'})`);
       } else {
         const every = Math.floor(+$('splitEvery').value);
         if (!(every >= 1)) throw new Error('Enter how many pages each file should have (1 or more).');
@@ -1506,10 +1645,10 @@
         const names = Object.keys(files);
         if (names.length === 1) {
           downloadBlob(new Blob([files[names[0]]], { type: 'application/pdf' }), names[0]);
-          status('Downloaded ' + names[0]);
+          status(DONE + ' ' + names[0]);
         } else {
           downloadBlob(PdfConvert.zip(files), `${base}-split.zip`);
-          status(`Downloaded ${names.length} PDFs in ${base}-split.zip`);
+          status(`${DONE} ${names.length} PDFs in ${base}-split.zip`);
         }
       }
     } catch (err) {
@@ -1589,6 +1728,10 @@
   });
   watermarkInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); toggleWatermark(); } });
   $('convertBtn').addEventListener('click', openConvertDialog);
+  $('ocrBtn').addEventListener('click', () => openOcrDialog());
+  $('ocrDialog').querySelector('form').addEventListener('submit', (e) => { e.preventDefault(); runOcr(); });
+  $('ocrDialog').addEventListener('close', () => { if (!$('progressDialog').open) setTimeout(() => { if (!$('progressDialog').open) afterOcr = null; }, 0); });
+  $('progressDialog').addEventListener('cancel', (e) => e.preventDefault()); // Esc doesn't hide a running job
   $('convertDialog').querySelector('form').addEventListener('submit', (e) => { e.preventDefault(); runConvert(); });
   $('convertDialog').querySelectorAll('input[name=convertFormat]').forEach((r) => r.addEventListener('change', syncConvertDialog));
   $('convertRanges').addEventListener('focus', () => { $('convertDialog').querySelector('input[name=convertPages][value=some]').checked = true; });
@@ -1596,8 +1739,7 @@
     const file = e.target.files[0];
     e.target.value = '';
     await openFile(file);
-    if (pages.length && hasText()) openConvertDialog();
-    else if (pages.length) status(NO_TEXT, 6000);
+    if (pages.length) openConvertDialog();
   });
   $('saveBtn').addEventListener('click', save);
   $('signBtn').addEventListener('click', startSignature);
@@ -1703,6 +1845,40 @@
   })();
   updateButtons();
 
+  // ---------- Desktop app ----------
+  // In the desktop app (Electron), files opened from the system ("Open with",
+  // double-click, File > Open) and menu commands arrive here.
+  if (window.desktop) {
+    document.body.classList.add('desktop');
+    $('saveBtn').textContent = 'Save as…';
+    $('saveBtn').title = 'Save the edited PDF (Ctrl+S)';
+    const asFile = (f) => new File([f.data], f.name, { type: 'application/pdf' });
+    window.desktop.onOpenFile((f) => openFile(asFile(f)));
+    window.desktop.onMergeFiles((list) => {
+      const files = list.map(asFile);
+      if (!pages.length) openFile(files.shift()).then(() => mergeFiles(files));
+      else mergeFiles(files);
+    });
+    window.desktop.onSaved((path) => {
+      if (/\.pdf$/i.test(path)) dirty = false;
+      status('Saved: ' + path, 5000);
+    });
+    const commands = {
+      save, undo, redo,
+      convert: openConvertDialog,
+      ocr: () => openOcrDialog(),
+      split: openSplitDialog,
+      password: openPasswordDialog,
+      sign: startSignature,
+      watermark: toggleWatermark,
+      zoomIn: () => pages.length && setZoom(zoom * 1.25),
+      zoomOut: () => pages.length && setZoom(zoom / 1.25),
+      newBlank: newBlankDocument,
+    };
+    window.desktop.onMenu((cmd) => { if (commands[cmd]) commands[cmd](); });
+    window.desktop.ready(); // the app may now send a file it was opened with
+  }
+
   // Exposed for automated tests.
-  window.pdfEditor = { buildPdf, exportAs, openFile, getState: () => ({ pages, zoom, tool, selection, savePassword }) };
+  window.pdfEditor = { buildPdf, exportAs, openFile, getState: () => ({ pages, zoom, tool, selection, savePassword, ocrPages: [...ocrLayers.keys()] }) };
 })();

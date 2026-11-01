@@ -234,6 +234,11 @@ button.link { all: unset; color: var(--accent); cursor: pointer; text-decoration
 .field.inline { width: 160px; height: 32px; margin: 0 0 0 4px; }
 .check[hidden] { display: none; }
 
+/* ---------- OCR ---------- */
+.lang-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 2px 12px; }
+#progressDialog progress { width: 100%; height: 14px; margin: 8px 0; }
+.btn.attention { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(37, 99, 235, .25); }
+
 /* ---------- Signature dialog ---------- */
 .sign-dialog { width: min(620px, calc(100vw - 32px)); }
 .sign-dialog .tabs { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
@@ -295,6 +300,7 @@ button.link { all: unset; color: var(--accent); cursor: pointer; text-decoration
       </span>
       <button class="btn" id="passwordBtn" disabled title="Protect the downloaded PDF with a password">Password</button>
       <button class="btn primary" id="saveBtn" disabled title="Download the edited PDF (Ctrl+S)">Download</button>
+      <button class="btn" id="ocrBtn" disabled title="Recognize the text in scanned pages (OCR), so the PDF can be searched, copied and converted">Recognize text</button>
       <button class="btn primary" id="convertBtn" disabled title="Convert to Word, Excel or OpenDocument">Convert</button>
     </div>
 
@@ -412,6 +418,32 @@ button.link { all: unset; color: var(--accent); cursor: pointer; text-decoration
         <button type="submit" class="primary">Convert</button>
       </div>
     </form>
+  </dialog>
+
+  <!-- Recognize text (OCR) -->
+  <dialog id="ocrDialog">
+    <form method="dialog" novalidate>
+      <h2>Recognize text (OCR)</h2>
+      <p class="muted" id="ocrInfo"></p>
+      <fieldset>
+        <legend>Languages in this document</legend>
+        <div id="ocrLangs" class="lang-list"></div>
+      </fieldset>
+      <p class="muted small-note">Tick only the languages the document uses: each extra one makes recognition slower and can add mistakes.</p>
+      <p class="error" id="ocrError" aria-live="polite"></p>
+      <div class="dialog-buttons">
+        <button type="button" data-close>Cancel</button>
+        <button type="submit" class="primary">Recognize</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Progress for long jobs -->
+  <dialog id="progressDialog">
+    <h2 id="progressTitle">Working…</h2>
+    <progress id="progressBar" max="1" value="0"></progress>
+    <p class="muted" id="progressText"></p>
+    <div class="dialog-buttons"><button type="button" id="progressStop">Stop</button></div>
   </dialog>
 
   <!-- Password for downloads -->
@@ -545,6 +577,11 @@ button.link { all: unset; color: var(--accent); cursor: pointer; text-decoration
   const apply = (m, x, y) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
   const hex = (c) => c.map((v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('').toUpperCase();
   const RENDER_SCALE = 2; // page picture used to read colours
+  // Chinese/Japanese characters and full-width punctuation: written without spaces.
+  const CJK = '\u2e80-\u2fdf\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef';
+  const isCJK = (ch) => !!ch && new RegExp(`[${CJK}]`).test(ch);
+  const CJK_SPACES = new RegExp(`([${CJK}])\\s+(?=[${CJK}])`, 'g');
+  const CJK_FONT = 'Microsoft YaHei';
 
   // Font family, bold and italic from the embedded font's name,
   // e.g. "ABCDEF+TimesNewRomanPS-BoldItalicMT" → Times New Roman, bold, italic.
@@ -712,7 +749,8 @@ button.link { all: unset; color: var(--accent); cursor: pointer; text-decoration
       if (size < 1) continue;
       const w = (it.width * Math.hypot(m[0], m[1])) / len;
       const x = m[4], y = m[5];
-      const font = fontInfo(page, it.fontName, tc.styles[it.fontName], fonts);
+      let font = fontInfo(page, it.fontName, tc.styles[it.fontName], fonts);
+      if (/glyph\s*less/i.test(font.family)) font = { ...font, family: [...it.str].some(isCJK) ? CJK_FONT : 'Arial' };
       const col = sampleColors(px, canvas.width, canvas.height, x, y - size * 0.8, x + w, y + size * 0.2);
       items.push({ str: it.str, x, y, w, size, ...font, color: col.fg, bg: col.bg });
     }
@@ -729,6 +767,7 @@ button.link { all: unset; color: var(--accent); cursor: pointer; text-decoration
   const sameStyle = (p, q) => p.family === q.family && p.bold === q.bold && p.italic === q.italic &&
     Math.abs(p.size - q.size) < 0.6 && p.color === q.color;
   const isWhite = (bg) => !bg || parseInt(bg.slice(0, 2), 16) + parseInt(bg.slice(2, 4), 16) + parseInt(bg.slice(4, 6), 16) > 735;
+  const colorDistance = (a, b) => Math.hypot(...[0, 2, 4].map((k) => parseInt(a.slice(k, k + 2), 16) - parseInt(b.slice(k, k + 2), 16)));
   const plain = (runs) => runs.map((r) => r.text).join('');
 
   function buildLines(items) {
@@ -752,7 +791,7 @@ button.link { all: unset; color: var(--accent); cursor: pointer; text-decoration
         if (!cell || gap > Math.max(line.size * 1.2, 9)) {
           cell = { x0: it.x, x1: it.x + it.w, runs: [] };
           line.cells.push(cell);
-        } else if (gap > Math.min(prev.size, it.size) * 0.15 && !/\s$/.test(prev.str) && !/^\s/.test(it.str)) {
+        } else if (gap > Math.min(prev.size, it.size) * 0.15 && !/\s$/.test(prev.str) && !/^\s/.test(it.str) && !(isCJK(prev.str.slice(-1)) && isCJK(it.str[0]))) {
           addText(cell.runs, ' ', prev);
         }
         addText(cell.runs, it.str, it);
@@ -760,7 +799,7 @@ button.link { all: unset; color: var(--accent); cursor: pointer; text-decoration
         prev = it;
       }
       for (const c of line.cells) {
-        c.runs = c.runs.map((r) => ({ ...r, text: r.text.replace(/\s+/g, ' ') }));
+        c.runs = c.runs.map((r) => ({ ...r, text: r.text.replace(/\s+/g, ' ').replace(CJK_SPACES, '$1') }));
         if (c.runs.length) { c.runs[0].text = c.runs[0].text.replace(/^ /, ''); const l = c.runs[c.runs.length - 1]; l.text = l.text.replace(/ $/, ''); }
         c.runs = c.runs.filter((r) => r.text);
         c.bg = line.items.find((it) => it.x >= c.x0 - 0.5)?.bg;
@@ -830,8 +869,8 @@ button.link { all: unset; color: var(--accent); cursor: pointer; text-decoration
         const next = lines[j + 1], cur = lines[j];
         const gap = next.y - cur.y;
         if (gap > Math.max(cur.size, next.size) * 3) break;
-        if (Math.abs(next.size - cur.size) > cur.size * 0.15) break; // e.g. a heading
         if (isRow(next)) { j++; continue; }
+        if (Math.abs(next.size - cur.size) > cur.size * 0.15) break; // e.g. a heading
         // A row with one filled cell can still belong to the table, if it
         // lines up with a column of the next row.
         const after = lines[j + 2];
@@ -933,16 +972,24 @@ button.link { all: unset; color: var(--accent); cursor: pointer; text-decoration
       blocks.push(im);
     }
     blocks.sort((p, q) => p.top - q.top);
-    return { width: pg.width, height: pg.height, blocks, textLeft, textRight, lines, bg: isWhite(pageBg) ? null : pageBg };
+    // paper: the page's actual background (e.g. slightly grey on scans); bg: only if it's a real colour.
+    return { width: pg.width, height: pg.height, blocks, textLeft, textRight, lines, paper: pageBg, bg: isWhite(pageBg) ? null : pageBg };
   }
 
   // Bullets drawn with Symbol/Wingdings fonts use private character codes.
   const SYMBOL_BULLETS = { '\uf0b7': '•', '\uf0a7': '▪', '\uf0a8': '▪', '\uf06e': '■', '\uf076': '❖', '\uf0d8': '➢', '\uf0fc': '✓', '\uf0e0': '•', '\uf02d': '–' };
   const BULLET_RE = /^([•●○◦▪▫■□‣⁃–\-*·❖➢✓\uf0b7\uf0a7\uf0a8\uf06e\uf076\uf0d8\uf0fc\uf0e0\uf02d]|\d{1,3}[.)]|[a-zA-Z][.)]|\(\w{1,3}\))$/;
 
+  // Text recognition (OCR) often reads a round bullet as one of these letters.
+  const MISREAD_BULLET = /^[eoO°©®«*]$/;
+
   // "•  Text", "1.  Text", "a)  Text" → a list item.
   function listMarker(line) {
     const first = plain(line.cells[0].runs).trim();
+    if (line.cells.length === 2 && MISREAD_BULLET.test(first) && /^\p{L}/u.test(plain(line.cells[1].runs).trim()) &&
+      line.cells[1].x0 - line.cells[0].x1 < line.size * 4) {
+      return { marker: '•', markerX: line.cells[0].x0, textX: line.cells[1].x0 };
+    }
     if (line.cells.length >= 2 && BULLET_RE.test(first) && line.cells[1].x0 - line.cells[0].x1 < line.size * 4) {
       return { marker: SYMBOL_BULLETS[first] || first, markerX: line.cells[0].x0, textX: line.cells[1].x0 };
     }
@@ -969,6 +1016,7 @@ button.link { all: unset; color: var(--accent); cursor: pointer; text-decoration
         if (i > 0 && k === 0 && runs.length) {
           const last = runs[runs.length - 1];
           if (/[a-z]-$/.test(last.text) && /^[a-z]/.test(cr[0].text)) last.text = last.text.slice(0, -1);
+          else if (isCJK(last.text.slice(-1)) && isCJK(cr[0].text[0])) { /* Chinese lines join without a space */ }
           else if (!/\s$/.test(last.text)) last.text += ' ';
         }
         for (const r of cr) { const last = runs[runs.length - 1]; if (last && sameStyle(last, r)) last.text += r.text; else runs.push(r); }
@@ -1089,18 +1137,18 @@ button.link { all: unset; color: var(--accent); cursor: pointer; text-decoration
       if (b.type === 'table') {
         for (const r of b.rows) {
           const row = [];
-          r.cells.forEach((c, k) => { if (c) row[k] = cellOf(c.runs, c.bg); });
+          r.cells.forEach((c, k) => { if (c) row[k] = cellOf(c.runs, c.bg, page.paper); });
           rows.push(row);
         }
       } else {
-        rows.push([cellOf(b.runs.map((r) => ({ ...r, text: r.text.replace(/\t/g, '  ') })), b.bg)]);
+        rows.push([cellOf(b.runs.map((r) => ({ ...r, text: r.text.replace(/\t/g, '  ') })), b.bg, page.paper)]);
       }
       lastBottom = b.bottom;
     }
     return rows;
   }
 
-  function cellOf(runs, bg) {
+  function cellOf(runs, bg, paper) {
     const text = plain(runs).trim();
     const num = parseNumber(text);
     const main = runs.reduce((m, r) => (r.text.length > (m ? m.text.length : -1) ? r : m), null) || {};
@@ -1109,7 +1157,7 @@ button.link { all: unset; color: var(--accent); cursor: pointer; text-decoration
       bold: runs.length > 0 && runs.every((r) => r.bold || !r.text.trim()),
       italic: runs.length > 0 && runs.every((r) => r.italic || !r.text.trim()),
       color: main.color && main.color !== '000000' && !/^(0[0-9A-F]){3}$/.test(main.color) ? main.color : null,
-      bg: bg && !isWhite(bg) ? bg : null,
+      bg: shade(bg, paper),
     };
   }
 
@@ -1133,7 +1181,8 @@ button.link { all: unset; color: var(--accent); cursor: pointer; text-decoration
   }
 
   // Shading for a paragraph or cell, unless it's just the page colour.
-  const shade = (bg, pageBg) => (bg && !isWhite(bg) && bg !== pageBg ? bg : null);
+  // Shading for a paragraph or cell, unless it's (nearly) the page's own colour.
+  const shade = (bg, paper) => (bg && !isWhite(bg) && (!paper || colorDistance(bg, paper) > 24) ? bg : null);
 
   // ---------- Word (.docx) ----------
   function toDocx(doc) {
@@ -1142,7 +1191,7 @@ button.link { all: unset; color: var(--accent); cursor: pointer; text-decoration
     const g = pageGeometry(doc.pages[0]);
     // Word has one page colour per document: use it when all pages agree.
     const docBg = doc.pages.every((p) => p.bg && p.bg === doc.pages[0].bg) ? doc.pages[0].bg : null;
-    const rPr = (r) => `<w:rPr><w:rFonts w:ascii="${xml(r.family)}" w:hAnsi="${xml(r.family)}" w:cs="${xml(r.family)}"/>` +
+    const rPr = (r) => `<w:rPr><w:rFonts w:ascii="${xml(r.family)}" w:hAnsi="${xml(r.family)}" w:cs="${xml(r.family)}" w:eastAsia="${xml([...r.text].some(isCJK) ? (r.family === 'Arial' ? CJK_FONT : r.family) : CJK_FONT)}"/>` +
       (r.bold ? '<w:b/>' : '') + (r.italic ? '<w:i/>' : '') +
       (r.color && r.color !== '000000' ? `<w:color w:val="${r.color}"/>` : '') +
       `<w:sz w:val="${Math.round(r.size * 2)}"/><w:szCs w:val="${Math.round(r.size * 2)}"/></w:rPr>`;
@@ -1169,7 +1218,7 @@ button.link { all: unset; color: var(--accent); cursor: pointer; text-decoration
           let runs = b.runs;
           if (b.bullet) runs = [{ ...b.runs[0], text: b.bullet.marker + '\t' }, ...b.runs];
           body.push(pXml({ runs, align: b.align, indent: b.indent, firstLine: b.firstLine, hanging: b.hanging, before: pageBreak ? 0 : before,
-            line: b.lineSpacing, bg: shade(b.bg, docBg), pageBreak, outline: lvl, tab: b.bullet ? b.indent : null }));
+            line: b.lineSpacing, bg: docBg ? shade(b.bg, docBg) : shade(b.bg, page.paper), pageBreak, outline: lvl, tab: b.bullet ? b.indent : null }));
         } else if (b.type === 'image') {
           media.push(b);
           const n = media.length;
@@ -1187,7 +1236,7 @@ button.link { all: unset; color: var(--accent); cursor: pointer; text-decoration
           body.push(pXml({ align: centered ? 'center' : 'left', indent: centered ? 0 : Math.max(0, b.x0 - geo.left), before: pageBreak ? 0 : before, pageBreak, inner: drawing }));
         } else if (b.type === 'table') {
           if (pageBreak || before > 2) body.push(pXml({ runs: [], before: pageBreak ? 0 : Math.max(0, before - 12), pageBreak, line: 0.5 }));
-          body.push(tableDocx(b, geo, runXml, pXml, docBg));
+          body.push(tableDocx(b, geo, runXml, pXml, docBg || page.paper));
         }
         prevBottom = b.bottom;
       });
@@ -1274,7 +1323,9 @@ button.link { all: unset; color: var(--accent); cursor: pointer; text-decoration
     }
     textProps(r) {
       this.fonts.add(r.family);
-      return `<style:text-properties style:font-name="${xml(r.family)}" fo:font-size="${+r.size.toFixed(1)}pt"` +
+      const asian = [...r.text].some(isCJK) ? r.family : CJK_FONT;
+      this.fonts.add(asian);
+      return `<style:text-properties style:font-name="${xml(r.family)}" style:font-name-asian="${xml(asian)}" style:font-size-asian="${+r.size.toFixed(1)}pt" fo:font-size="${+r.size.toFixed(1)}pt"` +
         (r.bold ? ' fo:font-weight="bold" style:font-weight-asian="bold" style:font-weight-complex="bold"' : '') +
         (r.italic ? ' fo:font-style="italic" style:font-style-asian="italic" style:font-style-complex="italic"' : '') +
         (r.color && r.color !== '000000' ? ` fo:color="#${r.color}"` : '') + '/>';
@@ -1323,7 +1374,7 @@ button.link { all: unset; color: var(--accent); cursor: pointer; text-decoration
           const lvl = headingLevel(b, doc.body);
           let runs = b.runs;
           if (b.bullet) runs = [{ ...b.runs[0], text: b.bullet.marker + '\t' }, ...b.runs];
-          const ps = pStyle({ align: b.align, indent: b.indent, firstLine: b.firstLine, hanging: b.hanging, before, line: b.lineSpacing, bg: shade(b.bg, page.bg), master, tab: b.bullet ? 0 : null });
+          const ps = pStyle({ align: b.align, indent: b.indent, firstLine: b.firstLine, hanging: b.hanging, before, line: b.lineSpacing, bg: shade(b.bg, page.paper), master, tab: b.bullet ? 0 : null });
           out.push(lvl ? `<text:h text:style-name="${ps}" text:outline-level="${lvl}">${spans(runs)}</text:h>` : `<text:p text:style-name="${ps}">${spans(runs)}</text:p>`);
         } else if (b.type === 'image') {
           media.push(b);
@@ -1340,7 +1391,7 @@ button.link { all: unset; color: var(--accent); cursor: pointer; text-decoration
           const ts = st.get('Tbl', 'table', `<style:table-properties style:width="${widths.reduce((s, w) => s + w, 0).toFixed(1)}pt" fo:margin-left="${Math.max(0, b.x0 - geo.left - 6).toFixed(1)}pt" table:align="left"/>`);
           const cols = widths.map((w) => `<table:table-column table:style-name="${st.get('Col', 'table-column', `<style:table-column-properties style:column-width="${w.toFixed(1)}pt"/>`)}"/>`).join('');
           const rows = b.rows.map((r) => `<table:table-row table:style-name="${st.get('Row', 'table-row', `<style:table-row-properties style:min-row-height="${r.height.toFixed(1)}pt"/>`)}">` + r.cells.map((c, k) => {
-            const bg = c ? shade(c.bg, page.bg) : null;
+            const bg = c ? shade(c.bg, page.paper) : null;
             const right = c && parseNumber(plain(c.runs)) && c.x1 > b.cols[k][1] - 2 && c.x0 > b.cols[k][0] + 2;
             const cs = st.get('Cell', 'table-cell', `<style:table-cell-properties fo:padding-top="0.5pt" fo:padding-bottom="0.5pt" fo:padding-left="4pt" fo:padding-right="4pt" fo:border="${b.borders ? '0.5pt solid #000000' : 'none'}"${bg ? ` fo:background-color="#${bg}"` : ''}/>`);
             const ps = pStyle({ align: right ? 'right' : 'left' });
@@ -1627,6 +1678,275 @@ button.link { all: unset; color: var(--accent); cursor: pointer; text-decoration
   }
 
   window.PdfConvert = { convert, zip, FORMATS: Object.keys(WRITERS), _internal: { parseNumber, layoutPage } };
+})();
+
+</script>
+  <script>/* vendor/ocr/tesseract.min.js */
+/*! For license information please see tesseract.min.js.LICENSE.txt */
+!function(t,r){"object"==typeof exports&&"object"==typeof module?module.exports=r():"function"==typeof define&&define.amd?define([],r):"object"==typeof exports?exports.Tesseract=r():t.Tesseract=r()}(self,(()=>(()=>{var t={30:(t,r,e)=>{function n(t){return n="function"==typeof Symbol&&"symbol"==typeof Symbol.iterator?function(t){return typeof t}:function(t){return t&&"function"==typeof Symbol&&t.constructor===Symbol&&t!==Symbol.prototype?"symbol":typeof t},n(t)}var o=function(t){"use strict";var r,e=Object.prototype,o=e.hasOwnProperty,i=Object.defineProperty||function(t,r,e){t[r]=e.value},a="function"==typeof Symbol?Symbol:{},c=a.iterator||"@@iterator",u=a.asyncIterator||"@@asyncIterator",f=a.toStringTag||"@@toStringTag";function s(t,r,e){return Object.defineProperty(t,r,{value:e,enumerable:!0,configurable:!0,writable:!0}),t[r]}try{s({},"")}catch(t){s=function(t,r,e){return t[r]=e}}function l(t,r,e,n){var o=r&&r.prototype instanceof m?r:m,a=Object.create(o.prototype),c=new N(n||[]);return i(a,"_invoke",{value:P(t,e,c)}),a}function h(t,r,e){try{return{type:"normal",arg:t.call(r,e)}}catch(t){return{type:"throw",arg:t}}}t.wrap=l;var p="suspendedStart",y="suspendedYield",v="executing",d="completed",g={};function m(){}function b(){}function w(){}var L={};s(L,c,(function(){return this}));var x=Object.getPrototypeOf,E=x&&x(x(A([])));E&&E!==e&&o.call(E,c)&&(L=E);var O=w.prototype=m.prototype=Object.create(L);function S(t){["next","throw","return"].forEach((function(r){s(t,r,(function(t){return this._invoke(r,t)}))}))}function j(t,r){function e(i,a,c,u){var f=h(t[i],t,a);if("throw"!==f.type){var s=f.arg,l=s.value;return l&&"object"===n(l)&&o.call(l,"__await")?r.resolve(l.__await).then((function(t){e("next",t,c,u)}),(function(t){e("throw",t,c,u)})):r.resolve(l).then((function(t){s.value=t,c(s)}),(function(t){return e("throw",t,c,u)}))}u(f.arg)}var a;i(this,"_invoke",{value:function(t,n){function o(){return new r((function(r,o){e(t,n,r,o)}))}return a=a?a.then(o,o):o()}})}function P(t,r,e){var n=p;return function(o,i){if(n===v)throw new Error("Generator is already running");if(n===d){if("throw"===o)throw i;return G()}for(e.method=o,e.arg=i;;){var a=e.delegate;if(a){var c=_(a,e);if(c){if(c===g)continue;return c}}if("next"===e.method)e.sent=e._sent=e.arg;else if("throw"===e.method){if(n===p)throw n=d,e.arg;e.dispatchException(e.arg)}else"return"===e.method&&e.abrupt("return",e.arg);n=v;var u=h(t,r,e);if("normal"===u.type){if(n=e.done?d:y,u.arg===g)continue;return{value:u.arg,done:e.done}}"throw"===u.type&&(n=d,e.method="throw",e.arg=u.arg)}}}function _(t,e){var n=e.method,o=t.iterator[n];if(o===r)return e.delegate=null,"throw"===n&&t.iterator.return&&(e.method="return",e.arg=r,_(t,e),"throw"===e.method)||"return"!==n&&(e.method="throw",e.arg=new TypeError("The iterator does not provide a '"+n+"' method")),g;var i=h(o,t.iterator,e.arg);if("throw"===i.type)return e.method="throw",e.arg=i.arg,e.delegate=null,g;var a=i.arg;return a?a.done?(e[t.resultName]=a.value,e.next=t.nextLoc,"return"!==e.method&&(e.method="next",e.arg=r),e.delegate=null,g):a:(e.method="throw",e.arg=new TypeError("iterator result is not an object"),e.delegate=null,g)}function k(t){var r={tryLoc:t[0]};1 in t&&(r.catchLoc=t[1]),2 in t&&(r.finallyLoc=t[2],r.afterLoc=t[3]),this.tryEntries.push(r)}function T(t){var r=t.completion||{};r.type="normal",delete r.arg,t.completion=r}function N(t){this.tryEntries=[{tryLoc:"root"}],t.forEach(k,this),this.reset(!0)}function A(t){if(t){var e=t[c];if(e)return e.call(t);if("function"==typeof t.next)return t;if(!isNaN(t.length)){var n=-1,i=function e(){for(;++n<t.length;)if(o.call(t,n))return e.value=t[n],e.done=!1,e;return e.value=r,e.done=!0,e};return i.next=i}}return{next:G}}function G(){return{value:r,done:!0}}return b.prototype=w,i(O,"constructor",{value:w,configurable:!0}),i(w,"constructor",{value:b,configurable:!0}),b.displayName=s(w,f,"GeneratorFunction"),t.isGeneratorFunction=function(t){var r="function"==typeof t&&t.constructor;return!!r&&(r===b||"GeneratorFunction"===(r.displayName||r.name))},t.mark=function(t){return Object.setPrototypeOf?Object.setPrototypeOf(t,w):(t.__proto__=w,s(t,f,"GeneratorFunction")),t.prototype=Object.create(O),t},t.awrap=function(t){return{__await:t}},S(j.prototype),s(j.prototype,u,(function(){return this})),t.AsyncIterator=j,t.async=function(r,e,n,o,i){void 0===i&&(i=Promise);var a=new j(l(r,e,n,o),i);return t.isGeneratorFunction(e)?a:a.next().then((function(t){return t.done?t.value:a.next()}))},S(O),s(O,f,"Generator"),s(O,c,(function(){return this})),s(O,"toString",(function(){return"[object Generator]"})),t.keys=function(t){var r=Object(t),e=[];for(var n in r)e.push(n);return e.reverse(),function t(){for(;e.length;){var n=e.pop();if(n in r)return t.value=n,t.done=!1,t}return t.done=!0,t}},t.values=A,N.prototype={constructor:N,reset:function(t){if(this.prev=0,this.next=0,this.sent=this._sent=r,this.done=!1,this.delegate=null,this.method="next",this.arg=r,this.tryEntries.forEach(T),!t)for(var e in this)"t"===e.charAt(0)&&o.call(this,e)&&!isNaN(+e.slice(1))&&(this[e]=r)},stop:function(){this.done=!0;var t=this.tryEntries[0].completion;if("throw"===t.type)throw t.arg;return this.rval},dispatchException:function(t){if(this.done)throw t;var e=this;function n(n,o){return c.type="throw",c.arg=t,e.next=n,o&&(e.method="next",e.arg=r),!!o}for(var i=this.tryEntries.length-1;i>=0;--i){var a=this.tryEntries[i],c=a.completion;if("root"===a.tryLoc)return n("end");if(a.tryLoc<=this.prev){var u=o.call(a,"catchLoc"),f=o.call(a,"finallyLoc");if(u&&f){if(this.prev<a.catchLoc)return n(a.catchLoc,!0);if(this.prev<a.finallyLoc)return n(a.finallyLoc)}else if(u){if(this.prev<a.catchLoc)return n(a.catchLoc,!0)}else{if(!f)throw new Error("try statement without catch or finally");if(this.prev<a.finallyLoc)return n(a.finallyLoc)}}}},abrupt:function(t,r){for(var e=this.tryEntries.length-1;e>=0;--e){var n=this.tryEntries[e];if(n.tryLoc<=this.prev&&o.call(n,"finallyLoc")&&this.prev<n.finallyLoc){var i=n;break}}i&&("break"===t||"continue"===t)&&i.tryLoc<=r&&r<=i.finallyLoc&&(i=null);var a=i?i.completion:{};return a.type=t,a.arg=r,i?(this.method="next",this.next=i.finallyLoc,g):this.complete(a)},complete:function(t,r){if("throw"===t.type)throw t.arg;return"break"===t.type||"continue"===t.type?this.next=t.arg:"return"===t.type?(this.rval=this.arg=t.arg,this.method="return",this.next="end"):"normal"===t.type&&r&&(this.next=r),g},finish:function(t){for(var r=this.tryEntries.length-1;r>=0;--r){var e=this.tryEntries[r];if(e.finallyLoc===t)return this.complete(e.completion,e.afterLoc),T(e),g}},catch:function(t){for(var r=this.tryEntries.length-1;r>=0;--r){var e=this.tryEntries[r];if(e.tryLoc===t){var n=e.completion;if("throw"===n.type){var o=n.arg;T(e)}return o}}throw new Error("illegal catch attempt")},delegateYield:function(t,e,n){return this.delegate={iterator:A(t),resultName:e,nextLoc:n},"next"===this.method&&(this.arg=r),g}},t}("object"===n(t=e.nmd(t))?t.exports:{});try{regeneratorRuntime=o}catch(t){"object"===("undefined"==typeof globalThis?"undefined":n(globalThis))?globalThis.regeneratorRuntime=o:Function("r","regeneratorRuntime = r")(o)}},35:(t,r,e)=>{"use strict";function n(t){return n="function"==typeof Symbol&&"symbol"==typeof Symbol.iterator?function(t){return typeof t}:function(t){return t&&"function"==typeof Symbol&&t.constructor===Symbol&&t!==Symbol.prototype?"symbol":typeof t},n(t)}function o(t,r){var e=Object.keys(t);if(Object.getOwnPropertySymbols){var n=Object.getOwnPropertySymbols(t);r&&(n=n.filter((function(r){return Object.getOwnPropertyDescriptor(t,r).enumerable}))),e.push.apply(e,n)}return e}function i(t,r,e){return(r=function(t){var r=function(t){if("object"!=n(t)||!t)return t;var r=t[Symbol.toPrimitive];if(void 0!==r){var e=r.call(t,"string");if("object"!=n(e))return e;throw new TypeError("@@toPrimitive must return a primitive value.")}return String(t)}(t);return"symbol"==n(r)?r:r+""}(r))in t?Object.defineProperty(t,r,{value:e,enumerable:!0,configurable:!0,writable:!0}):t[r]=e,t}var a="browser"===e(938)("type")?function(t){return new URL(t,window.location.href).href}:function(t){return t};t.exports=function(t){var r=function(t){for(var r=1;r<arguments.length;r++){var e=null!=arguments[r]?arguments[r]:{};r%2?o(Object(e),!0).forEach((function(r){i(t,r,e[r])})):Object.getOwnPropertyDescriptors?Object.defineProperties(t,Object.getOwnPropertyDescriptors(e)):o(Object(e)).forEach((function(r){Object.defineProperty(t,r,Object.getOwnPropertyDescriptor(e,r))}))}return t}({},t);return["corePath","workerPath","langPath"].forEach((function(e){t[e]&&(r[e]=a(r[e]))})),r}},65:function(t,r){"use strict";var e=this,n=!1;r.logging=n,r.setLogging=function(t){n=t},r.log=function(){for(var t=arguments.length,r=new Array(t),o=0;o<t;o++)r[o]=arguments[o];return n?console.log.apply(e,r):null}},70:t=>{"use strict";t.exports=function(t,r){return"".concat(t,"-").concat(r,"-").concat(Math.random().toString(16).slice(3,8))}},130:t=>{"use strict";function r(t){return r="function"==typeof Symbol&&"symbol"==typeof Symbol.iterator?function(t){return typeof t}:function(t){return t&&"function"==typeof Symbol&&t.constructor===Symbol&&t!==Symbol.prototype?"symbol":typeof t},r(t)}function e(){e=function(){return n};var t,n={},o=Object.prototype,i=o.hasOwnProperty,a=Object.defineProperty||function(t,r,e){t[r]=e.value},c="function"==typeof Symbol?Symbol:{},u=c.iterator||"@@iterator",f=c.asyncIterator||"@@asyncIterator",s=c.toStringTag||"@@toStringTag";function l(t,r,e){return Object.defineProperty(t,r,{value:e,enumerable:!0,configurable:!0,writable:!0}),t[r]}try{l({},"")}catch(t){l=function(t,r,e){return t[r]=e}}function h(t,r,e,n){var o=r&&r.prototype instanceof b?r:b,i=Object.create(o.prototype),c=new A(n||[]);return a(i,"_invoke",{value:_(t,e,c)}),i}function p(t,r,e){try{return{type:"normal",arg:t.call(r,e)}}catch(t){return{type:"throw",arg:t}}}n.wrap=h;var y="suspendedStart",v="suspendedYield",d="executing",g="completed",m={};function b(){}function w(){}function L(){}var x={};l(x,u,(function(){return this}));var E=Object.getPrototypeOf,O=E&&E(E(G([])));O&&O!==o&&i.call(O,u)&&(x=O);var S=L.prototype=b.prototype=Object.create(x);function j(t){["next","throw","return"].forEach((function(r){l(t,r,(function(t){return this._invoke(r,t)}))}))}function P(t,e){function n(o,a,c,u){var f=p(t[o],t,a);if("throw"!==f.type){var s=f.arg,l=s.value;return l&&"object"==r(l)&&i.call(l,"__await")?e.resolve(l.__await).then((function(t){n("next",t,c,u)}),(function(t){n("throw",t,c,u)})):e.resolve(l).then((function(t){s.value=t,c(s)}),(function(t){return n("throw",t,c,u)}))}u(f.arg)}var o;a(this,"_invoke",{value:function(t,r){function i(){return new e((function(e,o){n(t,r,e,o)}))}return o=o?o.then(i,i):i()}})}function _(r,e,n){var o=y;return function(i,a){if(o===d)throw Error("Generator is already running");if(o===g){if("throw"===i)throw a;return{value:t,done:!0}}for(n.method=i,n.arg=a;;){var c=n.delegate;if(c){var u=k(c,n);if(u){if(u===m)continue;return u}}if("next"===n.method)n.sent=n._sent=n.arg;else if("throw"===n.method){if(o===y)throw o=g,n.arg;n.dispatchException(n.arg)}else"return"===n.method&&n.abrupt("return",n.arg);o=d;var f=p(r,e,n);if("normal"===f.type){if(o=n.done?g:v,f.arg===m)continue;return{value:f.arg,done:n.done}}"throw"===f.type&&(o=g,n.method="throw",n.arg=f.arg)}}}function k(r,e){var n=e.method,o=r.iterator[n];if(o===t)return e.delegate=null,"throw"===n&&r.iterator.return&&(e.method="return",e.arg=t,k(r,e),"throw"===e.method)||"return"!==n&&(e.method="throw",e.arg=new TypeError("The iterator does not provide a '"+n+"' method")),m;var i=p(o,r.iterator,e.arg);if("throw"===i.type)return e.method="throw",e.arg=i.arg,e.delegate=null,m;var a=i.arg;return a?a.done?(e[r.resultName]=a.value,e.next=r.nextLoc,"return"!==e.method&&(e.method="next",e.arg=t),e.delegate=null,m):a:(e.method="throw",e.arg=new TypeError("iterator result is not an object"),e.delegate=null,m)}function T(t){var r={tryLoc:t[0]};1 in t&&(r.catchLoc=t[1]),2 in t&&(r.finallyLoc=t[2],r.afterLoc=t[3]),this.tryEntries.push(r)}function N(t){var r=t.completion||{};r.type="normal",delete r.arg,t.completion=r}function A(t){this.tryEntries=[{tryLoc:"root"}],t.forEach(T,this),this.reset(!0)}function G(e){if(e||""===e){var n=e[u];if(n)return n.call(e);if("function"==typeof e.next)return e;if(!isNaN(e.length)){var o=-1,a=function r(){for(;++o<e.length;)if(i.call(e,o))return r.value=e[o],r.done=!1,r;return r.value=t,r.done=!0,r};return a.next=a}}throw new TypeError(r(e)+" is not iterable")}return w.prototype=L,a(S,"constructor",{value:L,configurable:!0}),a(L,"constructor",{value:w,configurable:!0}),w.displayName=l(L,s,"GeneratorFunction"),n.isGeneratorFunction=function(t){var r="function"==typeof t&&t.constructor;return!!r&&(r===w||"GeneratorFunction"===(r.displayName||r.name))},n.mark=function(t){return Object.setPrototypeOf?Object.setPrototypeOf(t,L):(t.__proto__=L,l(t,s,"GeneratorFunction")),t.prototype=Object.create(S),t},n.awrap=function(t){return{__await:t}},j(P.prototype),l(P.prototype,f,(function(){return this})),n.AsyncIterator=P,n.async=function(t,r,e,o,i){void 0===i&&(i=Promise);var a=new P(h(t,r,e,o),i);return n.isGeneratorFunction(r)?a:a.next().then((function(t){return t.done?t.value:a.next()}))},j(S),l(S,s,"Generator"),l(S,u,(function(){return this})),l(S,"toString",(function(){return"[object Generator]"})),n.keys=function(t){var r=Object(t),e=[];for(var n in r)e.push(n);return e.reverse(),function t(){for(;e.length;){var n=e.pop();if(n in r)return t.value=n,t.done=!1,t}return t.done=!0,t}},n.values=G,A.prototype={constructor:A,reset:function(r){if(this.prev=0,this.next=0,this.sent=this._sent=t,this.done=!1,this.delegate=null,this.method="next",this.arg=t,this.tryEntries.forEach(N),!r)for(var e in this)"t"===e.charAt(0)&&i.call(this,e)&&!isNaN(+e.slice(1))&&(this[e]=t)},stop:function(){this.done=!0;var t=this.tryEntries[0].completion;if("throw"===t.type)throw t.arg;return this.rval},dispatchException:function(r){if(this.done)throw r;var e=this;function n(n,o){return c.type="throw",c.arg=r,e.next=n,o&&(e.method="next",e.arg=t),!!o}for(var o=this.tryEntries.length-1;o>=0;--o){var a=this.tryEntries[o],c=a.completion;if("root"===a.tryLoc)return n("end");if(a.tryLoc<=this.prev){var u=i.call(a,"catchLoc"),f=i.call(a,"finallyLoc");if(u&&f){if(this.prev<a.catchLoc)return n(a.catchLoc,!0);if(this.prev<a.finallyLoc)return n(a.finallyLoc)}else if(u){if(this.prev<a.catchLoc)return n(a.catchLoc,!0)}else{if(!f)throw Error("try statement without catch or finally");if(this.prev<a.finallyLoc)return n(a.finallyLoc)}}}},abrupt:function(t,r){for(var e=this.tryEntries.length-1;e>=0;--e){var n=this.tryEntries[e];if(n.tryLoc<=this.prev&&i.call(n,"finallyLoc")&&this.prev<n.finallyLoc){var o=n;break}}o&&("break"===t||"continue"===t)&&o.tryLoc<=r&&r<=o.finallyLoc&&(o=null);var a=o?o.completion:{};return a.type=t,a.arg=r,o?(this.method="next",this.next=o.finallyLoc,m):this.complete(a)},complete:function(t,r){if("throw"===t.type)throw t.arg;return"break"===t.type||"continue"===t.type?this.next=t.arg:"return"===t.type?(this.rval=this.arg=t.arg,this.method="return",this.next="end"):"normal"===t.type&&r&&(this.next=r),m},finish:function(t){for(var r=this.tryEntries.length-1;r>=0;--r){var e=this.tryEntries[r];if(e.finallyLoc===t)return this.complete(e.completion,e.afterLoc),N(e),m}},catch:function(t){for(var r=this.tryEntries.length-1;r>=0;--r){var e=this.tryEntries[r];if(e.tryLoc===t){var n=e.completion;if("throw"===n.type){var o=n.arg;N(e)}return o}}throw Error("illegal catch attempt")},delegateYield:function(r,e,n){return this.delegate={iterator:G(r),resultName:e,nextLoc:n},"next"===this.method&&(this.arg=t),m}},n}function n(t,r,e,n,o,i,a){try{var c=t[i](a),u=c.value}catch(t){return void e(t)}c.done?r(u):Promise.resolve(u).then(n,o)}function o(t){return function(){var r=this,e=arguments;return new Promise((function(o,i){var a=t.apply(r,e);function c(t){n(a,o,i,c,u,"next",t)}function u(t){n(a,o,i,c,u,"throw",t)}c(void 0)}))}}var i=function(t){return new Promise((function(r,e){var n=new FileReader;n.onload=function(){r(n.result)},n.onerror=function(t){var r=t.target.error.code;e(Error("File could not be read! Code=".concat(r)))},n.readAsArrayBuffer(t)}))},a=function(){var t=o(e().mark((function t(r){var n,c,u;return e().wrap((function(t){for(;;)switch(t.prev=t.next){case 0:if(n=r,void 0!==r){t.next=3;break}return t.abrupt("return","undefined");case 3:if("string"!=typeof r){t.next=16;break}if(!/data:image\/([a-zA-Z]*);base64,([^"]*)/.test(r)){t.next=8;break}n=atob(r.split(",")[1]).split("").map((function(t){return t.charCodeAt(0)})),t.next=14;break;case 8:return t.next=10,fetch(r);case 10:return c=t.sent,t.next=13,c.arrayBuffer();case 13:n=t.sent;case 14:t.next=43;break;case 16:if(!("undefined"!=typeof HTMLElement&&r instanceof HTMLElement)){t.next=30;break}if("IMG"!==r.tagName){t.next=21;break}return t.next=20,a(r.src);case 20:n=t.sent;case 21:if("VIDEO"!==r.tagName){t.next=25;break}return t.next=24,a(r.poster);case 24:n=t.sent;case 25:if("CANVAS"!==r.tagName){t.next=28;break}return t.next=28,new Promise((function(t){r.toBlob(function(){var r=o(e().mark((function r(o){return e().wrap((function(r){for(;;)switch(r.prev=r.next){case 0:return r.next=2,i(o);case 2:n=r.sent,t();case 4:case"end":return r.stop()}}),r)})));return function(t){return r.apply(this,arguments)}}())}));case 28:t.next=43;break;case 30:if(!("undefined"!=typeof OffscreenCanvas&&r instanceof OffscreenCanvas)){t.next=39;break}return t.next=33,r.convertToBlob();case 33:return u=t.sent,t.next=36,i(u);case 36:n=t.sent,t.next=43;break;case 39:if(!(r instanceof File||r instanceof Blob)){t.next=43;break}return t.next=42,i(r);case 42:n=t.sent;case 43:return t.abrupt("return",new Uint8Array(n));case 44:case"end":return t.stop()}}),t)})));return function(r){return t.apply(this,arguments)}}();t.exports=a},192:t=>{"use strict";t.exports={AFR:"afr",AMH:"amh",ARA:"ara",ASM:"asm",AZE:"aze",AZE_CYRL:"aze_cyrl",BEL:"bel",BEN:"ben",BOD:"bod",BOS:"bos",BUL:"bul",CAT:"cat",CEB:"ceb",CES:"ces",CHI_SIM:"chi_sim",CHI_TRA:"chi_tra",CHR:"chr",CYM:"cym",DAN:"dan",DEU:"deu",DZO:"dzo",ELL:"ell",ENG:"eng",ENM:"enm",EPO:"epo",EST:"est",EUS:"eus",FAS:"fas",FIN:"fin",FRA:"fra",FRK:"frk",FRM:"frm",GLE:"gle",GLG:"glg",GRC:"grc",GUJ:"guj",HAT:"hat",HEB:"heb",HIN:"hin",HRV:"hrv",HUN:"hun",IKU:"iku",IND:"ind",ISL:"isl",ITA:"ita",ITA_OLD:"ita_old",JAV:"jav",JPN:"jpn",KAN:"kan",KAT:"kat",KAT_OLD:"kat_old",KAZ:"kaz",KHM:"khm",KIR:"kir",KOR:"kor",KUR:"kur",LAO:"lao",LAT:"lat",LAV:"lav",LIT:"lit",MAL:"mal",MAR:"mar",MKD:"mkd",MLT:"mlt",MSA:"msa",MYA:"mya",NEP:"nep",NLD:"nld",NOR:"nor",ORI:"ori",PAN:"pan",POL:"pol",POR:"por",PUS:"pus",RON:"ron",RUS:"rus",SAN:"san",SIN:"sin",SLK:"slk",SLV:"slv",SPA:"spa",SPA_OLD:"spa_old",SQI:"sqi",SRP:"srp",SRP_LATN:"srp_latn",SWA:"swa",SWE:"swe",SYR:"syr",TAM:"tam",TEL:"tel",TGK:"tgk",TGL:"tgl",THA:"tha",TIR:"tir",TUR:"tur",UIG:"uig",UKR:"ukr",URD:"urd",UZB:"uzb",UZB_CYRL:"uzb_cyrl",VIE:"vie",YID:"yid"}},286:t=>{"use strict";t.exports={workerBlobURL:!0,logger:function(){}}},318:t=>{"use strict";t.exports=function(t){var r,e=t.workerPath,n=t.workerBlobURL;if(Blob&&URL&&n){var o=new Blob(['importScripts("'.concat(e,'");')],{type:"application/javascript"});r=new Worker(URL.createObjectURL(o))}else r=new Worker(e);return r}},330:t=>{"use strict";t.exports={rE:"7.0.0"}},364:function(t,r,e){"use strict";function n(t){return n="function"==typeof Symbol&&"symbol"==typeof Symbol.iterator?function(t){return typeof t}:function(t){return t&&"function"==typeof Symbol&&t.constructor===Symbol&&t!==Symbol.prototype?"symbol":typeof t},n(t)}var o=this;function i(){i=function(){return r};var t,r={},e=Object.prototype,o=e.hasOwnProperty,a=Object.defineProperty||function(t,r,e){t[r]=e.value},c="function"==typeof Symbol?Symbol:{},u=c.iterator||"@@iterator",f=c.asyncIterator||"@@asyncIterator",s=c.toStringTag||"@@toStringTag";function l(t,r,e){return Object.defineProperty(t,r,{value:e,enumerable:!0,configurable:!0,writable:!0}),t[r]}try{l({},"")}catch(t){l=function(t,r,e){return t[r]=e}}function h(t,r,e,n){var o=r&&r.prototype instanceof b?r:b,i=Object.create(o.prototype),c=new A(n||[]);return a(i,"_invoke",{value:_(t,e,c)}),i}function p(t,r,e){try{return{type:"normal",arg:t.call(r,e)}}catch(t){return{type:"throw",arg:t}}}r.wrap=h;var y="suspendedStart",v="suspendedYield",d="executing",g="completed",m={};function b(){}function w(){}function L(){}var x={};l(x,u,(function(){return this}));var E=Object.getPrototypeOf,O=E&&E(E(G([])));O&&O!==e&&o.call(O,u)&&(x=O);var S=L.prototype=b.prototype=Object.create(x);function j(t){["next","throw","return"].forEach((function(r){l(t,r,(function(t){return this._invoke(r,t)}))}))}function P(t,r){function e(i,a,c,u){var f=p(t[i],t,a);if("throw"!==f.type){var s=f.arg,l=s.value;return l&&"object"==n(l)&&o.call(l,"__await")?r.resolve(l.__await).then((function(t){e("next",t,c,u)}),(function(t){e("throw",t,c,u)})):r.resolve(l).then((function(t){s.value=t,c(s)}),(function(t){return e("throw",t,c,u)}))}u(f.arg)}var i;a(this,"_invoke",{value:function(t,n){function o(){return new r((function(r,o){e(t,n,r,o)}))}return i=i?i.then(o,o):o()}})}function _(r,e,n){var o=y;return function(i,a){if(o===d)throw Error("Generator is already running");if(o===g){if("throw"===i)throw a;return{value:t,done:!0}}for(n.method=i,n.arg=a;;){var c=n.delegate;if(c){var u=k(c,n);if(u){if(u===m)continue;return u}}if("next"===n.method)n.sent=n._sent=n.arg;else if("throw"===n.method){if(o===y)throw o=g,n.arg;n.dispatchException(n.arg)}else"return"===n.method&&n.abrupt("return",n.arg);o=d;var f=p(r,e,n);if("normal"===f.type){if(o=n.done?g:v,f.arg===m)continue;return{value:f.arg,done:n.done}}"throw"===f.type&&(o=g,n.method="throw",n.arg=f.arg)}}}function k(r,e){var n=e.method,o=r.iterator[n];if(o===t)return e.delegate=null,"throw"===n&&r.iterator.return&&(e.method="return",e.arg=t,k(r,e),"throw"===e.method)||"return"!==n&&(e.method="throw",e.arg=new TypeError("The iterator does not provide a '"+n+"' method")),m;var i=p(o,r.iterator,e.arg);if("throw"===i.type)return e.method="throw",e.arg=i.arg,e.delegate=null,m;var a=i.arg;return a?a.done?(e[r.resultName]=a.value,e.next=r.nextLoc,"return"!==e.method&&(e.method="next",e.arg=t),e.delegate=null,m):a:(e.method="throw",e.arg=new TypeError("iterator result is not an object"),e.delegate=null,m)}function T(t){var r={tryLoc:t[0]};1 in t&&(r.catchLoc=t[1]),2 in t&&(r.finallyLoc=t[2],r.afterLoc=t[3]),this.tryEntries.push(r)}function N(t){var r=t.completion||{};r.type="normal",delete r.arg,t.completion=r}function A(t){this.tryEntries=[{tryLoc:"root"}],t.forEach(T,this),this.reset(!0)}function G(r){if(r||""===r){var e=r[u];if(e)return e.call(r);if("function"==typeof r.next)return r;if(!isNaN(r.length)){var i=-1,a=function e(){for(;++i<r.length;)if(o.call(r,i))return e.value=r[i],e.done=!1,e;return e.value=t,e.done=!0,e};return a.next=a}}throw new TypeError(n(r)+" is not iterable")}return w.prototype=L,a(S,"constructor",{value:L,configurable:!0}),a(L,"constructor",{value:w,configurable:!0}),w.displayName=l(L,s,"GeneratorFunction"),r.isGeneratorFunction=function(t){var r="function"==typeof t&&t.constructor;return!!r&&(r===w||"GeneratorFunction"===(r.displayName||r.name))},r.mark=function(t){return Object.setPrototypeOf?Object.setPrototypeOf(t,L):(t.__proto__=L,l(t,s,"GeneratorFunction")),t.prototype=Object.create(S),t},r.awrap=function(t){return{__await:t}},j(P.prototype),l(P.prototype,f,(function(){return this})),r.AsyncIterator=P,r.async=function(t,e,n,o,i){void 0===i&&(i=Promise);var a=new P(h(t,e,n,o),i);return r.isGeneratorFunction(e)?a:a.next().then((function(t){return t.done?t.value:a.next()}))},j(S),l(S,s,"Generator"),l(S,u,(function(){return this})),l(S,"toString",(function(){return"[object Generator]"})),r.keys=function(t){var r=Object(t),e=[];for(var n in r)e.push(n);return e.reverse(),function t(){for(;e.length;){var n=e.pop();if(n in r)return t.value=n,t.done=!1,t}return t.done=!0,t}},r.values=G,A.prototype={constructor:A,reset:function(r){if(this.prev=0,this.next=0,this.sent=this._sent=t,this.done=!1,this.delegate=null,this.method="next",this.arg=t,this.tryEntries.forEach(N),!r)for(var e in this)"t"===e.charAt(0)&&o.call(this,e)&&!isNaN(+e.slice(1))&&(this[e]=t)},stop:function(){this.done=!0;var t=this.tryEntries[0].completion;if("throw"===t.type)throw t.arg;return this.rval},dispatchException:function(r){if(this.done)throw r;var e=this;function n(n,o){return c.type="throw",c.arg=r,e.next=n,o&&(e.method="next",e.arg=t),!!o}for(var i=this.tryEntries.length-1;i>=0;--i){var a=this.tryEntries[i],c=a.completion;if("root"===a.tryLoc)return n("end");if(a.tryLoc<=this.prev){var u=o.call(a,"catchLoc"),f=o.call(a,"finallyLoc");if(u&&f){if(this.prev<a.catchLoc)return n(a.catchLoc,!0);if(this.prev<a.finallyLoc)return n(a.finallyLoc)}else if(u){if(this.prev<a.catchLoc)return n(a.catchLoc,!0)}else{if(!f)throw Error("try statement without catch or finally");if(this.prev<a.finallyLoc)return n(a.finallyLoc)}}}},abrupt:function(t,r){for(var e=this.tryEntries.length-1;e>=0;--e){var n=this.tryEntries[e];if(n.tryLoc<=this.prev&&o.call(n,"finallyLoc")&&this.prev<n.finallyLoc){var i=n;break}}i&&("break"===t||"continue"===t)&&i.tryLoc<=r&&r<=i.finallyLoc&&(i=null);var a=i?i.completion:{};return a.type=t,a.arg=r,i?(this.method="next",this.next=i.finallyLoc,m):this.complete(a)},complete:function(t,r){if("throw"===t.type)throw t.arg;return"break"===t.type||"continue"===t.type?this.next=t.arg:"return"===t.type?(this.rval=this.arg=t.arg,this.method="return",this.next="end"):"normal"===t.type&&r&&(this.next=r),m},finish:function(t){for(var r=this.tryEntries.length-1;r>=0;--r){var e=this.tryEntries[r];if(e.finallyLoc===t)return this.complete(e.completion,e.afterLoc),N(e),m}},catch:function(t){for(var r=this.tryEntries.length-1;r>=0;--r){var e=this.tryEntries[r];if(e.tryLoc===t){var n=e.completion;if("throw"===n.type){var o=n.arg;N(e)}return o}}throw Error("illegal catch attempt")},delegateYield:function(r,e,n){return this.delegate={iterator:G(r),resultName:e,nextLoc:n},"next"===this.method&&(this.arg=t),m}},r}function a(t,r){(null==r||r>t.length)&&(r=t.length);for(var e=0,n=Array(r);e<r;e++)n[e]=t[e];return n}function c(t,r,e,n,o,i,a){try{var c=t[i](a),u=c.value}catch(t){return void e(t)}c.done?r(u):Promise.resolve(u).then(n,o)}function u(t){return function(){var r=this,e=arguments;return new Promise((function(n,o){var i=t.apply(r,e);function a(t){c(i,n,o,a,u,"next",t)}function u(t){c(i,n,o,a,u,"throw",t)}a(void 0)}))}}var f=e(910),s=e(65).log,l=e(70),h=0;t.exports=function(){var t=l("Scheduler",h),r={},e={},n=[];h+=1;var c=function(){return Object.keys(r).length},p=function(){if(0!==n.length)for(var t=Object.keys(r),o=0;o<t.length;o+=1)if(void 0===e[t[o]]){n[0](r[t[o]]);break}},y=function(r,c){return new Promise((function(l,h){var y=f({action:r,payload:c});n.push(function(){var t=u(i().mark((function t(u){return i().wrap((function(t){for(;;)switch(t.prev=t.next){case 0:return n.shift(),e[u.id]=y,t.prev=2,t.t0=l,t.next=6,u[r].apply(o,[].concat(function(t){if(Array.isArray(t))return a(t)}(i=c)||function(t){if("undefined"!=typeof Symbol&&null!=t[Symbol.iterator]||null!=t["@@iterator"])return Array.from(t)}(i)||function(t,r){if(t){if("string"==typeof t)return a(t,r);var e={}.toString.call(t).slice(8,-1);return"Object"===e&&t.constructor&&(e=t.constructor.name),"Map"===e||"Set"===e?Array.from(t):"Arguments"===e||/^(?:Ui|I)nt(?:8|16|32)(?:Clamped)?Array$/.test(e)?a(t,r):void 0}}(i)||function(){throw new TypeError("Invalid attempt to spread non-iterable instance.\nIn order to be iterable, non-array objects must have a [Symbol.iterator]() method.")}(),[y.id]));case 6:t.t1=t.sent,(0,t.t0)(t.t1),t.next=13;break;case 10:t.prev=10,t.t2=t.catch(2),h(t.t2);case 13:return t.prev=13,delete e[u.id],p(),t.finish(13);case 17:case"end":return t.stop()}var i}),t,null,[[2,10,13,17]])})));return function(r){return t.apply(this,arguments)}}()),s("[".concat(t,"]: Add ").concat(y.id," to JobQueue")),s("[".concat(t,"]: JobQueue length=").concat(n.length)),p()}))},v=function(){var r=u(i().mark((function r(e){var n,o,a,u=arguments;return i().wrap((function(r){for(;;)switch(r.prev=r.next){case 0:if(0!==c()){r.next=2;break}throw Error("[".concat(t,"]: You need to have at least one worker before adding jobs"));case 2:for(n=u.length,o=new Array(n>1?n-1:0),a=1;a<n;a++)o[a-1]=u[a];return r.abrupt("return",y(e,o));case 4:case"end":return r.stop()}}),r)})));return function(t){return r.apply(this,arguments)}}(),d=function(){var t=u(i().mark((function t(){return i().wrap((function(t){for(;;)switch(t.prev=t.next){case 0:Object.keys(r).forEach(function(){var t=u(i().mark((function t(e){return i().wrap((function(t){for(;;)switch(t.prev=t.next){case 0:return t.next=2,r[e].terminate();case 2:case"end":return t.stop()}}),t)})));return function(r){return t.apply(this,arguments)}}()),n=[];case 2:case"end":return t.stop()}}),t)})));return function(){return t.apply(this,arguments)}}();return{addWorker:function(e){return r[e.id]=e,s("[".concat(t,"]: Add ").concat(e.id)),s("[".concat(t,"]: Number of workers=").concat(c())),p(),e.id},addJob:v,terminate:d,getQueueLen:function(){return n.length},getNumWorkers:c}}},523:(t,r,e)=>{"use strict";var n=e(830),o=e(318),i=e(862),a=e(727),c=e(753),u=e(130);t.exports={defaultOptions:n,spawnWorker:o,terminateWorker:i,onMessage:a,send:c,loadImage:u}},535:(t,r,e)=>{"use strict";function n(t){return n="function"==typeof Symbol&&"symbol"==typeof Symbol.iterator?function(t){return typeof t}:function(t){return t&&"function"==typeof Symbol&&t.constructor===Symbol&&t!==Symbol.prototype?"symbol":typeof t},n(t)}function o(){o=function(){return r};var t,r={},e=Object.prototype,i=e.hasOwnProperty,a=Object.defineProperty||function(t,r,e){t[r]=e.value},c="function"==typeof Symbol?Symbol:{},u=c.iterator||"@@iterator",f=c.asyncIterator||"@@asyncIterator",s=c.toStringTag||"@@toStringTag";function l(t,r,e){return Object.defineProperty(t,r,{value:e,enumerable:!0,configurable:!0,writable:!0}),t[r]}try{l({},"")}catch(t){l=function(t,r,e){return t[r]=e}}function h(t,r,e,n){var o=r&&r.prototype instanceof b?r:b,i=Object.create(o.prototype),c=new A(n||[]);return a(i,"_invoke",{value:_(t,e,c)}),i}function p(t,r,e){try{return{type:"normal",arg:t.call(r,e)}}catch(t){return{type:"throw",arg:t}}}r.wrap=h;var y="suspendedStart",v="suspendedYield",d="executing",g="completed",m={};function b(){}function w(){}function L(){}var x={};l(x,u,(function(){return this}));var E=Object.getPrototypeOf,O=E&&E(E(G([])));O&&O!==e&&i.call(O,u)&&(x=O);var S=L.prototype=b.prototype=Object.create(x);function j(t){["next","throw","return"].forEach((function(r){l(t,r,(function(t){return this._invoke(r,t)}))}))}function P(t,r){function e(o,a,c,u){var f=p(t[o],t,a);if("throw"!==f.type){var s=f.arg,l=s.value;return l&&"object"==n(l)&&i.call(l,"__await")?r.resolve(l.__await).then((function(t){e("next",t,c,u)}),(function(t){e("throw",t,c,u)})):r.resolve(l).then((function(t){s.value=t,c(s)}),(function(t){return e("throw",t,c,u)}))}u(f.arg)}var o;a(this,"_invoke",{value:function(t,n){function i(){return new r((function(r,o){e(t,n,r,o)}))}return o=o?o.then(i,i):i()}})}function _(r,e,n){var o=y;return function(i,a){if(o===d)throw Error("Generator is already running");if(o===g){if("throw"===i)throw a;return{value:t,done:!0}}for(n.method=i,n.arg=a;;){var c=n.delegate;if(c){var u=k(c,n);if(u){if(u===m)continue;return u}}if("next"===n.method)n.sent=n._sent=n.arg;else if("throw"===n.method){if(o===y)throw o=g,n.arg;n.dispatchException(n.arg)}else"return"===n.method&&n.abrupt("return",n.arg);o=d;var f=p(r,e,n);if("normal"===f.type){if(o=n.done?g:v,f.arg===m)continue;return{value:f.arg,done:n.done}}"throw"===f.type&&(o=g,n.method="throw",n.arg=f.arg)}}}function k(r,e){var n=e.method,o=r.iterator[n];if(o===t)return e.delegate=null,"throw"===n&&r.iterator.return&&(e.method="return",e.arg=t,k(r,e),"throw"===e.method)||"return"!==n&&(e.method="throw",e.arg=new TypeError("The iterator does not provide a '"+n+"' method")),m;var i=p(o,r.iterator,e.arg);if("throw"===i.type)return e.method="throw",e.arg=i.arg,e.delegate=null,m;var a=i.arg;return a?a.done?(e[r.resultName]=a.value,e.next=r.nextLoc,"return"!==e.method&&(e.method="next",e.arg=t),e.delegate=null,m):a:(e.method="throw",e.arg=new TypeError("iterator result is not an object"),e.delegate=null,m)}function T(t){var r={tryLoc:t[0]};1 in t&&(r.catchLoc=t[1]),2 in t&&(r.finallyLoc=t[2],r.afterLoc=t[3]),this.tryEntries.push(r)}function N(t){var r=t.completion||{};r.type="normal",delete r.arg,t.completion=r}function A(t){this.tryEntries=[{tryLoc:"root"}],t.forEach(T,this),this.reset(!0)}function G(r){if(r||""===r){var e=r[u];if(e)return e.call(r);if("function"==typeof r.next)return r;if(!isNaN(r.length)){var o=-1,a=function e(){for(;++o<r.length;)if(i.call(r,o))return e.value=r[o],e.done=!1,e;return e.value=t,e.done=!0,e};return a.next=a}}throw new TypeError(n(r)+" is not iterable")}return w.prototype=L,a(S,"constructor",{value:L,configurable:!0}),a(L,"constructor",{value:w,configurable:!0}),w.displayName=l(L,s,"GeneratorFunction"),r.isGeneratorFunction=function(t){var r="function"==typeof t&&t.constructor;return!!r&&(r===w||"GeneratorFunction"===(r.displayName||r.name))},r.mark=function(t){return Object.setPrototypeOf?Object.setPrototypeOf(t,L):(t.__proto__=L,l(t,s,"GeneratorFunction")),t.prototype=Object.create(S),t},r.awrap=function(t){return{__await:t}},j(P.prototype),l(P.prototype,f,(function(){return this})),r.AsyncIterator=P,r.async=function(t,e,n,o,i){void 0===i&&(i=Promise);var a=new P(h(t,e,n,o),i);return r.isGeneratorFunction(e)?a:a.next().then((function(t){return t.done?t.value:a.next()}))},j(S),l(S,s,"Generator"),l(S,u,(function(){return this})),l(S,"toString",(function(){return"[object Generator]"})),r.keys=function(t){var r=Object(t),e=[];for(var n in r)e.push(n);return e.reverse(),function t(){for(;e.length;){var n=e.pop();if(n in r)return t.value=n,t.done=!1,t}return t.done=!0,t}},r.values=G,A.prototype={constructor:A,reset:function(r){if(this.prev=0,this.next=0,this.sent=this._sent=t,this.done=!1,this.delegate=null,this.method="next",this.arg=t,this.tryEntries.forEach(N),!r)for(var e in this)"t"===e.charAt(0)&&i.call(this,e)&&!isNaN(+e.slice(1))&&(this[e]=t)},stop:function(){this.done=!0;var t=this.tryEntries[0].completion;if("throw"===t.type)throw t.arg;return this.rval},dispatchException:function(r){if(this.done)throw r;var e=this;function n(n,o){return c.type="throw",c.arg=r,e.next=n,o&&(e.method="next",e.arg=t),!!o}for(var o=this.tryEntries.length-1;o>=0;--o){var a=this.tryEntries[o],c=a.completion;if("root"===a.tryLoc)return n("end");if(a.tryLoc<=this.prev){var u=i.call(a,"catchLoc"),f=i.call(a,"finallyLoc");if(u&&f){if(this.prev<a.catchLoc)return n(a.catchLoc,!0);if(this.prev<a.finallyLoc)return n(a.finallyLoc)}else if(u){if(this.prev<a.catchLoc)return n(a.catchLoc,!0)}else{if(!f)throw Error("try statement without catch or finally");if(this.prev<a.finallyLoc)return n(a.finallyLoc)}}}},abrupt:function(t,r){for(var e=this.tryEntries.length-1;e>=0;--e){var n=this.tryEntries[e];if(n.tryLoc<=this.prev&&i.call(n,"finallyLoc")&&this.prev<n.finallyLoc){var o=n;break}}o&&("break"===t||"continue"===t)&&o.tryLoc<=r&&r<=o.finallyLoc&&(o=null);var a=o?o.completion:{};return a.type=t,a.arg=r,o?(this.method="next",this.next=o.finallyLoc,m):this.complete(a)},complete:function(t,r){if("throw"===t.type)throw t.arg;return"break"===t.type||"continue"===t.type?this.next=t.arg:"return"===t.type?(this.rval=this.arg=t.arg,this.method="return",this.next="end"):"normal"===t.type&&r&&(this.next=r),m},finish:function(t){for(var r=this.tryEntries.length-1;r>=0;--r){var e=this.tryEntries[r];if(e.finallyLoc===t)return this.complete(e.completion,e.afterLoc),N(e),m}},catch:function(t){for(var r=this.tryEntries.length-1;r>=0;--r){var e=this.tryEntries[r];if(e.tryLoc===t){var n=e.completion;if("throw"===n.type){var o=n.arg;N(e)}return o}}throw Error("illegal catch attempt")},delegateYield:function(r,e,n){return this.delegate={iterator:G(r),resultName:e,nextLoc:n},"next"===this.method&&(this.arg=t),m}},r}function i(t,r,e,n,o,i,a){try{var c=t[i](a),u=c.value}catch(t){return void e(t)}c.done?r(u):Promise.resolve(u).then(n,o)}function a(t){return function(){var r=this,e=arguments;return new Promise((function(n,o){var a=t.apply(r,e);function c(t){i(a,n,o,c,u,"next",t)}function u(t){i(a,n,o,c,u,"throw",t)}c(void 0)}))}}var c=e(603),u=function(){var t=a(o().mark((function t(r,e,n){var i;return o().wrap((function(t){for(;;)switch(t.prev=t.next){case 0:return t.next=2,c(e,1,n);case 2:return i=t.sent,t.abrupt("return",i.recognize(r).finally(a(o().mark((function t(){return o().wrap((function(t){for(;;)switch(t.prev=t.next){case 0:return t.next=2,i.terminate();case 2:case"end":return t.stop()}}),t)})))));case 4:case"end":return t.stop()}}),t)})));return function(r,e,n){return t.apply(this,arguments)}}(),f=function(){var t=a(o().mark((function t(r,e){var n;return o().wrap((function(t){for(;;)switch(t.prev=t.next){case 0:return t.next=2,c("osd",0,e);case 2:return n=t.sent,t.abrupt("return",n.detect(r).finally(a(o().mark((function t(){return o().wrap((function(t){for(;;)switch(t.prev=t.next){case 0:return t.next=2,n.terminate();case 2:case"end":return t.stop()}}),t)})))));case 4:case"end":return t.stop()}}),t)})));return function(r,e){return t.apply(this,arguments)}}();t.exports={recognize:u,detect:f}},603:(t,r,e)=>{"use strict";function n(t){return n="function"==typeof Symbol&&"symbol"==typeof Symbol.iterator?function(t){return typeof t}:function(t){return t&&"function"==typeof Symbol&&t.constructor===Symbol&&t!==Symbol.prototype?"symbol":typeof t},n(t)}var o=["logger","errorHandler"];function i(){i=function(){return r};var t,r={},e=Object.prototype,o=e.hasOwnProperty,a=Object.defineProperty||function(t,r,e){t[r]=e.value},c="function"==typeof Symbol?Symbol:{},u=c.iterator||"@@iterator",f=c.asyncIterator||"@@asyncIterator",s=c.toStringTag||"@@toStringTag";function l(t,r,e){return Object.defineProperty(t,r,{value:e,enumerable:!0,configurable:!0,writable:!0}),t[r]}try{l({},"")}catch(t){l=function(t,r,e){return t[r]=e}}function h(t,r,e,n){var o=r&&r.prototype instanceof b?r:b,i=Object.create(o.prototype),c=new A(n||[]);return a(i,"_invoke",{value:_(t,e,c)}),i}function p(t,r,e){try{return{type:"normal",arg:t.call(r,e)}}catch(t){return{type:"throw",arg:t}}}r.wrap=h;var y="suspendedStart",v="suspendedYield",d="executing",g="completed",m={};function b(){}function w(){}function L(){}var x={};l(x,u,(function(){return this}));var E=Object.getPrototypeOf,O=E&&E(E(G([])));O&&O!==e&&o.call(O,u)&&(x=O);var S=L.prototype=b.prototype=Object.create(x);function j(t){["next","throw","return"].forEach((function(r){l(t,r,(function(t){return this._invoke(r,t)}))}))}function P(t,r){function e(i,a,c,u){var f=p(t[i],t,a);if("throw"!==f.type){var s=f.arg,l=s.value;return l&&"object"==n(l)&&o.call(l,"__await")?r.resolve(l.__await).then((function(t){e("next",t,c,u)}),(function(t){e("throw",t,c,u)})):r.resolve(l).then((function(t){s.value=t,c(s)}),(function(t){return e("throw",t,c,u)}))}u(f.arg)}var i;a(this,"_invoke",{value:function(t,n){function o(){return new r((function(r,o){e(t,n,r,o)}))}return i=i?i.then(o,o):o()}})}function _(r,e,n){var o=y;return function(i,a){if(o===d)throw Error("Generator is already running");if(o===g){if("throw"===i)throw a;return{value:t,done:!0}}for(n.method=i,n.arg=a;;){var c=n.delegate;if(c){var u=k(c,n);if(u){if(u===m)continue;return u}}if("next"===n.method)n.sent=n._sent=n.arg;else if("throw"===n.method){if(o===y)throw o=g,n.arg;n.dispatchException(n.arg)}else"return"===n.method&&n.abrupt("return",n.arg);o=d;var f=p(r,e,n);if("normal"===f.type){if(o=n.done?g:v,f.arg===m)continue;return{value:f.arg,done:n.done}}"throw"===f.type&&(o=g,n.method="throw",n.arg=f.arg)}}}function k(r,e){var n=e.method,o=r.iterator[n];if(o===t)return e.delegate=null,"throw"===n&&r.iterator.return&&(e.method="return",e.arg=t,k(r,e),"throw"===e.method)||"return"!==n&&(e.method="throw",e.arg=new TypeError("The iterator does not provide a '"+n+"' method")),m;var i=p(o,r.iterator,e.arg);if("throw"===i.type)return e.method="throw",e.arg=i.arg,e.delegate=null,m;var a=i.arg;return a?a.done?(e[r.resultName]=a.value,e.next=r.nextLoc,"return"!==e.method&&(e.method="next",e.arg=t),e.delegate=null,m):a:(e.method="throw",e.arg=new TypeError("iterator result is not an object"),e.delegate=null,m)}function T(t){var r={tryLoc:t[0]};1 in t&&(r.catchLoc=t[1]),2 in t&&(r.finallyLoc=t[2],r.afterLoc=t[3]),this.tryEntries.push(r)}function N(t){var r=t.completion||{};r.type="normal",delete r.arg,t.completion=r}function A(t){this.tryEntries=[{tryLoc:"root"}],t.forEach(T,this),this.reset(!0)}function G(r){if(r||""===r){var e=r[u];if(e)return e.call(r);if("function"==typeof r.next)return r;if(!isNaN(r.length)){var i=-1,a=function e(){for(;++i<r.length;)if(o.call(r,i))return e.value=r[i],e.done=!1,e;return e.value=t,e.done=!0,e};return a.next=a}}throw new TypeError(n(r)+" is not iterable")}return w.prototype=L,a(S,"constructor",{value:L,configurable:!0}),a(L,"constructor",{value:w,configurable:!0}),w.displayName=l(L,s,"GeneratorFunction"),r.isGeneratorFunction=function(t){var r="function"==typeof t&&t.constructor;return!!r&&(r===w||"GeneratorFunction"===(r.displayName||r.name))},r.mark=function(t){return Object.setPrototypeOf?Object.setPrototypeOf(t,L):(t.__proto__=L,l(t,s,"GeneratorFunction")),t.prototype=Object.create(S),t},r.awrap=function(t){return{__await:t}},j(P.prototype),l(P.prototype,f,(function(){return this})),r.AsyncIterator=P,r.async=function(t,e,n,o,i){void 0===i&&(i=Promise);var a=new P(h(t,e,n,o),i);return r.isGeneratorFunction(e)?a:a.next().then((function(t){return t.done?t.value:a.next()}))},j(S),l(S,s,"Generator"),l(S,u,(function(){return this})),l(S,"toString",(function(){return"[object Generator]"})),r.keys=function(t){var r=Object(t),e=[];for(var n in r)e.push(n);return e.reverse(),function t(){for(;e.length;){var n=e.pop();if(n in r)return t.value=n,t.done=!1,t}return t.done=!0,t}},r.values=G,A.prototype={constructor:A,reset:function(r){if(this.prev=0,this.next=0,this.sent=this._sent=t,this.done=!1,this.delegate=null,this.method="next",this.arg=t,this.tryEntries.forEach(N),!r)for(var e in this)"t"===e.charAt(0)&&o.call(this,e)&&!isNaN(+e.slice(1))&&(this[e]=t)},stop:function(){this.done=!0;var t=this.tryEntries[0].completion;if("throw"===t.type)throw t.arg;return this.rval},dispatchException:function(r){if(this.done)throw r;var e=this;function n(n,o){return c.type="throw",c.arg=r,e.next=n,o&&(e.method="next",e.arg=t),!!o}for(var i=this.tryEntries.length-1;i>=0;--i){var a=this.tryEntries[i],c=a.completion;if("root"===a.tryLoc)return n("end");if(a.tryLoc<=this.prev){var u=o.call(a,"catchLoc"),f=o.call(a,"finallyLoc");if(u&&f){if(this.prev<a.catchLoc)return n(a.catchLoc,!0);if(this.prev<a.finallyLoc)return n(a.finallyLoc)}else if(u){if(this.prev<a.catchLoc)return n(a.catchLoc,!0)}else{if(!f)throw Error("try statement without catch or finally");if(this.prev<a.finallyLoc)return n(a.finallyLoc)}}}},abrupt:function(t,r){for(var e=this.tryEntries.length-1;e>=0;--e){var n=this.tryEntries[e];if(n.tryLoc<=this.prev&&o.call(n,"finallyLoc")&&this.prev<n.finallyLoc){var i=n;break}}i&&("break"===t||"continue"===t)&&i.tryLoc<=r&&r<=i.finallyLoc&&(i=null);var a=i?i.completion:{};return a.type=t,a.arg=r,i?(this.method="next",this.next=i.finallyLoc,m):this.complete(a)},complete:function(t,r){if("throw"===t.type)throw t.arg;return"break"===t.type||"continue"===t.type?this.next=t.arg:"return"===t.type?(this.rval=this.arg=t.arg,this.method="return",this.next="end"):"normal"===t.type&&r&&(this.next=r),m},finish:function(t){for(var r=this.tryEntries.length-1;r>=0;--r){var e=this.tryEntries[r];if(e.finallyLoc===t)return this.complete(e.completion,e.afterLoc),N(e),m}},catch:function(t){for(var r=this.tryEntries.length-1;r>=0;--r){var e=this.tryEntries[r];if(e.tryLoc===t){var n=e.completion;if("throw"===n.type){var o=n.arg;N(e)}return o}}throw Error("illegal catch attempt")},delegateYield:function(r,e,n){return this.delegate={iterator:G(r),resultName:e,nextLoc:n},"next"===this.method&&(this.arg=t),m}},r}function a(t,r){(null==r||r>t.length)&&(r=t.length);for(var e=0,n=Array(r);e<r;e++)n[e]=t[e];return n}function c(t,r){var e=Object.keys(t);if(Object.getOwnPropertySymbols){var n=Object.getOwnPropertySymbols(t);r&&(n=n.filter((function(r){return Object.getOwnPropertyDescriptor(t,r).enumerable}))),e.push.apply(e,n)}return e}function u(t){for(var r=1;r<arguments.length;r++){var e=null!=arguments[r]?arguments[r]:{};r%2?c(Object(e),!0).forEach((function(r){f(t,r,e[r])})):Object.getOwnPropertyDescriptors?Object.defineProperties(t,Object.getOwnPropertyDescriptors(e)):c(Object(e)).forEach((function(r){Object.defineProperty(t,r,Object.getOwnPropertyDescriptor(e,r))}))}return t}function f(t,r,e){return(r=function(t){var r=function(t){if("object"!=n(t)||!t)return t;var r=t[Symbol.toPrimitive];if(void 0!==r){var e=r.call(t,"string");if("object"!=n(e))return e;throw new TypeError("@@toPrimitive must return a primitive value.")}return String(t)}(t);return"symbol"==n(r)?r:r+""}(r))in t?Object.defineProperty(t,r,{value:e,enumerable:!0,configurable:!0,writable:!0}):t[r]=e,t}function s(t,r){if(null==t)return{};var e,n,o=function(t,r){if(null==t)return{};var e={};for(var n in t)if({}.hasOwnProperty.call(t,n)){if(-1!==r.indexOf(n))continue;e[n]=t[n]}return e}(t,r);if(Object.getOwnPropertySymbols){var i=Object.getOwnPropertySymbols(t);for(n=0;n<i.length;n++)e=i[n],-1===r.indexOf(e)&&{}.propertyIsEnumerable.call(t,e)&&(o[e]=t[e])}return o}function l(t,r,e,n,o,i,a){try{var c=t[i](a),u=c.value}catch(t){return void e(t)}c.done?r(u):Promise.resolve(u).then(n,o)}function h(t){return function(){var r=this,e=arguments;return new Promise((function(n,o){var i=t.apply(r,e);function a(t){l(i,n,o,a,c,"next",t)}function c(t){l(i,n,o,a,c,"throw",t)}a(void 0)}))}}var p=e(35),y=e(910),v=e(65).log,d=e(70),g=e(972),m=e(523),b=m.defaultOptions,w=m.spawnWorker,L=m.terminateWorker,x=m.onMessage,E=m.loadImage,O=m.send,S=0;t.exports=h(i().mark((function t(){var r,e,n,c,f,l,m,j,P,_,k,T,N,A,G,I,F,R,D,M,C,U,Y,B,H,K,W,z,J,V,Z,Q,q,X,$=arguments;return i().wrap((function(t){for(;;)switch(t.prev=t.next){case 0:return r=$.length>0&&void 0!==$[0]?$[0]:"eng",e=$.length>1&&void 0!==$[1]?$[1]:g.LSTM_ONLY,n=$.length>2&&void 0!==$[2]?$[2]:{},c=$.length>3&&void 0!==$[3]?$[3]:{},f=d("Worker",S),l=p(u(u({},b),n)),m=l.logger,j=l.errorHandler,P=s(l,o),_={},k="string"==typeof r?r.split("+"):r,T=e,N=c,A=[g.DEFAULT,g.LSTM_ONLY].includes(e)&&!P.legacyCore,F=new Promise((function(t,r){I=t,G=r})),R=function(t){G(t.message)},(D=w(P)).onerror=R,S+=1,M=function(t){var r=t.id,e=t.action,n=t.payload;return new Promise((function(t,o){v("[".concat(f,"]: Start ").concat(r,", action=").concat(e));var i="".concat(e,"-").concat(r);_[i]={resolve:t,reject:o},O(D,{workerId:f,jobId:r,action:e,payload:n})}))},C=function(){return console.warn("`load` is depreciated and should be removed from code (workers now come pre-loaded)")},U=function(t){return M(y({id:t,action:"load",payload:{options:{lstmOnly:A,corePath:P.corePath,logging:P.logging}}}))},Y=function(t,r,e){return M(y({id:e,action:"FS",payload:{method:"writeFile",args:[t,r]}}))},B=function(t,r){return M(y({id:r,action:"FS",payload:{method:"readFile",args:[t,{encoding:"utf8"}]}}))},H=function(t,r){return M(y({id:r,action:"FS",payload:{method:"unlink",args:[t]}}))},K=function(t,r,e){return M(y({id:e,action:"FS",payload:{method:t,args:r}}))},W=function(t,r){return M(y({id:r,action:"loadLanguage",payload:{langs:t,options:{langPath:P.langPath,dataPath:P.dataPath,cachePath:P.cachePath,cacheMethod:P.cacheMethod,gzip:P.gzip,lstmOnly:[g.DEFAULT,g.LSTM_ONLY].includes(T)&&!P.legacyLang}}}))},z=function(t,r,e,n){return M(y({id:n,action:"initialize",payload:{langs:t,oem:r,config:e}}))},J=function(){var t=arguments.length>0&&void 0!==arguments[0]?arguments[0]:"eng",r=arguments.length>1?arguments[1]:void 0,e=arguments.length>2?arguments[2]:void 0,n=arguments.length>3?arguments[3]:void 0;if(A&&[g.TESSERACT_ONLY,g.TESSERACT_LSTM_COMBINED].includes(r))throw Error("Legacy model requested but code missing.");var o=r||T;T=o;var i=e||N;N=i;var c,u=("string"==typeof t?t.split("+"):t).filter((function(t){return!k.includes(t)}));return k.push.apply(k,function(t){if(Array.isArray(t))return a(t)}(c=u)||function(t){if("undefined"!=typeof Symbol&&null!=t[Symbol.iterator]||null!=t["@@iterator"])return Array.from(t)}(c)||function(t,r){if(t){if("string"==typeof t)return a(t,r);var e={}.toString.call(t).slice(8,-1);return"Object"===e&&t.constructor&&(e=t.constructor.name),"Map"===e||"Set"===e?Array.from(t):"Arguments"===e||/^(?:Ui|I)nt(?:8|16|32)(?:Clamped)?Array$/.test(e)?a(t,r):void 0}}(c)||function(){throw new TypeError("Invalid attempt to spread non-iterable instance.\nIn order to be iterable, non-array objects must have a [Symbol.iterator]() method.")}()),u.length>0?W(u,n).then((function(){return z(t,o,i,n)})):z(t,o,i,n)},V=function(){return M(y({id:arguments.length>1?arguments[1]:void 0,action:"setParameters",payload:{params:arguments.length>0&&void 0!==arguments[0]?arguments[0]:{}}}))},Z=function(){var t=h(i().mark((function t(r){var e,n,o,a=arguments;return i().wrap((function(t){for(;;)switch(t.prev=t.next){case 0:return e=a.length>1&&void 0!==a[1]?a[1]:{},n=a.length>2&&void 0!==a[2]?a[2]:{text:!0},o=a.length>3?a[3]:void 0,t.t0=M,t.t1=y,t.t2=o,t.next=8,E(r);case 8:return t.t3=t.sent,t.t4=e,t.t5=n,t.t6={image:t.t3,options:t.t4,output:t.t5},t.t7={id:t.t2,action:"recognize",payload:t.t6},t.t8=(0,t.t1)(t.t7),t.abrupt("return",(0,t.t0)(t.t8));case 15:case"end":return t.stop()}}),t)})));return function(r){return t.apply(this,arguments)}}(),Q=function(){var t=h(i().mark((function t(r,e){return i().wrap((function(t){for(;;)switch(t.prev=t.next){case 0:if(!A){t.next=2;break}throw Error("`worker.detect` requires Legacy model, which was not loaded.");case 2:return t.t0=M,t.t1=y,t.t2=e,t.next=7,E(r);case 7:return t.t3=t.sent,t.t4={image:t.t3},t.t5={id:t.t2,action:"detect",payload:t.t4},t.t6=(0,t.t1)(t.t5),t.abrupt("return",(0,t.t0)(t.t6));case 12:case"end":return t.stop()}}),t)})));return function(r,e){return t.apply(this,arguments)}}(),q=function(){var t=h(i().mark((function t(){return i().wrap((function(t){for(;;)switch(t.prev=t.next){case 0:return null!==D&&(L(D),D=null),t.abrupt("return",Promise.resolve());case 2:case"end":return t.stop()}}),t)})));return function(){return t.apply(this,arguments)}}(),x(D,(function(t){var r=t.workerId,e=t.jobId,n=t.status,o=t.action,i=t.data,a="".concat(o,"-").concat(e);if("resolve"===n)v("[".concat(r,"]: Complete ").concat(e)),_[a].resolve({jobId:e,data:i}),delete _[a];else if("reject"===n){if(_[a].reject(i),delete _[a],"load"===o&&G(i),!j)throw Error(i);j(i)}else"progress"===n&&m(u(u({},i),{},{userJobId:e}))})),X={id:f,worker:D,load:C,writeText:Y,readText:B,removeFile:H,FS:K,reinitialize:J,setParameters:V,recognize:Z,detect:Q,terminate:q},U().then((function(){return W(r)})).then((function(){return z(r,e,c)})).then((function(){return I(X)})).catch((function(){})),t.abrupt("return",F);case 34:case"end":return t.stop()}}),t)})))},727:t=>{"use strict";t.exports=function(t,r){t.onmessage=function(t){var e=t.data;r(e)}}},753:t=>{"use strict";function r(t){return r="function"==typeof Symbol&&"symbol"==typeof Symbol.iterator?function(t){return typeof t}:function(t){return t&&"function"==typeof Symbol&&t.constructor===Symbol&&t!==Symbol.prototype?"symbol":typeof t},r(t)}function e(){e=function(){return n};var t,n={},o=Object.prototype,i=o.hasOwnProperty,a=Object.defineProperty||function(t,r,e){t[r]=e.value},c="function"==typeof Symbol?Symbol:{},u=c.iterator||"@@iterator",f=c.asyncIterator||"@@asyncIterator",s=c.toStringTag||"@@toStringTag";function l(t,r,e){return Object.defineProperty(t,r,{value:e,enumerable:!0,configurable:!0,writable:!0}),t[r]}try{l({},"")}catch(t){l=function(t,r,e){return t[r]=e}}function h(t,r,e,n){var o=r&&r.prototype instanceof b?r:b,i=Object.create(o.prototype),c=new A(n||[]);return a(i,"_invoke",{value:_(t,e,c)}),i}function p(t,r,e){try{return{type:"normal",arg:t.call(r,e)}}catch(t){return{type:"throw",arg:t}}}n.wrap=h;var y="suspendedStart",v="suspendedYield",d="executing",g="completed",m={};function b(){}function w(){}function L(){}var x={};l(x,u,(function(){return this}));var E=Object.getPrototypeOf,O=E&&E(E(G([])));O&&O!==o&&i.call(O,u)&&(x=O);var S=L.prototype=b.prototype=Object.create(x);function j(t){["next","throw","return"].forEach((function(r){l(t,r,(function(t){return this._invoke(r,t)}))}))}function P(t,e){function n(o,a,c,u){var f=p(t[o],t,a);if("throw"!==f.type){var s=f.arg,l=s.value;return l&&"object"==r(l)&&i.call(l,"__await")?e.resolve(l.__await).then((function(t){n("next",t,c,u)}),(function(t){n("throw",t,c,u)})):e.resolve(l).then((function(t){s.value=t,c(s)}),(function(t){return n("throw",t,c,u)}))}u(f.arg)}var o;a(this,"_invoke",{value:function(t,r){function i(){return new e((function(e,o){n(t,r,e,o)}))}return o=o?o.then(i,i):i()}})}function _(r,e,n){var o=y;return function(i,a){if(o===d)throw Error("Generator is already running");if(o===g){if("throw"===i)throw a;return{value:t,done:!0}}for(n.method=i,n.arg=a;;){var c=n.delegate;if(c){var u=k(c,n);if(u){if(u===m)continue;return u}}if("next"===n.method)n.sent=n._sent=n.arg;else if("throw"===n.method){if(o===y)throw o=g,n.arg;n.dispatchException(n.arg)}else"return"===n.method&&n.abrupt("return",n.arg);o=d;var f=p(r,e,n);if("normal"===f.type){if(o=n.done?g:v,f.arg===m)continue;return{value:f.arg,done:n.done}}"throw"===f.type&&(o=g,n.method="throw",n.arg=f.arg)}}}function k(r,e){var n=e.method,o=r.iterator[n];if(o===t)return e.delegate=null,"throw"===n&&r.iterator.return&&(e.method="return",e.arg=t,k(r,e),"throw"===e.method)||"return"!==n&&(e.method="throw",e.arg=new TypeError("The iterator does not provide a '"+n+"' method")),m;var i=p(o,r.iterator,e.arg);if("throw"===i.type)return e.method="throw",e.arg=i.arg,e.delegate=null,m;var a=i.arg;return a?a.done?(e[r.resultName]=a.value,e.next=r.nextLoc,"return"!==e.method&&(e.method="next",e.arg=t),e.delegate=null,m):a:(e.method="throw",e.arg=new TypeError("iterator result is not an object"),e.delegate=null,m)}function T(t){var r={tryLoc:t[0]};1 in t&&(r.catchLoc=t[1]),2 in t&&(r.finallyLoc=t[2],r.afterLoc=t[3]),this.tryEntries.push(r)}function N(t){var r=t.completion||{};r.type="normal",delete r.arg,t.completion=r}function A(t){this.tryEntries=[{tryLoc:"root"}],t.forEach(T,this),this.reset(!0)}function G(e){if(e||""===e){var n=e[u];if(n)return n.call(e);if("function"==typeof e.next)return e;if(!isNaN(e.length)){var o=-1,a=function r(){for(;++o<e.length;)if(i.call(e,o))return r.value=e[o],r.done=!1,r;return r.value=t,r.done=!0,r};return a.next=a}}throw new TypeError(r(e)+" is not iterable")}return w.prototype=L,a(S,"constructor",{value:L,configurable:!0}),a(L,"constructor",{value:w,configurable:!0}),w.displayName=l(L,s,"GeneratorFunction"),n.isGeneratorFunction=function(t){var r="function"==typeof t&&t.constructor;return!!r&&(r===w||"GeneratorFunction"===(r.displayName||r.name))},n.mark=function(t){return Object.setPrototypeOf?Object.setPrototypeOf(t,L):(t.__proto__=L,l(t,s,"GeneratorFunction")),t.prototype=Object.create(S),t},n.awrap=function(t){return{__await:t}},j(P.prototype),l(P.prototype,f,(function(){return this})),n.AsyncIterator=P,n.async=function(t,r,e,o,i){void 0===i&&(i=Promise);var a=new P(h(t,r,e,o),i);return n.isGeneratorFunction(r)?a:a.next().then((function(t){return t.done?t.value:a.next()}))},j(S),l(S,s,"Generator"),l(S,u,(function(){return this})),l(S,"toString",(function(){return"[object Generator]"})),n.keys=function(t){var r=Object(t),e=[];for(var n in r)e.push(n);return e.reverse(),function t(){for(;e.length;){var n=e.pop();if(n in r)return t.value=n,t.done=!1,t}return t.done=!0,t}},n.values=G,A.prototype={constructor:A,reset:function(r){if(this.prev=0,this.next=0,this.sent=this._sent=t,this.done=!1,this.delegate=null,this.method="next",this.arg=t,this.tryEntries.forEach(N),!r)for(var e in this)"t"===e.charAt(0)&&i.call(this,e)&&!isNaN(+e.slice(1))&&(this[e]=t)},stop:function(){this.done=!0;var t=this.tryEntries[0].completion;if("throw"===t.type)throw t.arg;return this.rval},dispatchException:function(r){if(this.done)throw r;var e=this;function n(n,o){return c.type="throw",c.arg=r,e.next=n,o&&(e.method="next",e.arg=t),!!o}for(var o=this.tryEntries.length-1;o>=0;--o){var a=this.tryEntries[o],c=a.completion;if("root"===a.tryLoc)return n("end");if(a.tryLoc<=this.prev){var u=i.call(a,"catchLoc"),f=i.call(a,"finallyLoc");if(u&&f){if(this.prev<a.catchLoc)return n(a.catchLoc,!0);if(this.prev<a.finallyLoc)return n(a.finallyLoc)}else if(u){if(this.prev<a.catchLoc)return n(a.catchLoc,!0)}else{if(!f)throw Error("try statement without catch or finally");if(this.prev<a.finallyLoc)return n(a.finallyLoc)}}}},abrupt:function(t,r){for(var e=this.tryEntries.length-1;e>=0;--e){var n=this.tryEntries[e];if(n.tryLoc<=this.prev&&i.call(n,"finallyLoc")&&this.prev<n.finallyLoc){var o=n;break}}o&&("break"===t||"continue"===t)&&o.tryLoc<=r&&r<=o.finallyLoc&&(o=null);var a=o?o.completion:{};return a.type=t,a.arg=r,o?(this.method="next",this.next=o.finallyLoc,m):this.complete(a)},complete:function(t,r){if("throw"===t.type)throw t.arg;return"break"===t.type||"continue"===t.type?this.next=t.arg:"return"===t.type?(this.rval=this.arg=t.arg,this.method="return",this.next="end"):"normal"===t.type&&r&&(this.next=r),m},finish:function(t){for(var r=this.tryEntries.length-1;r>=0;--r){var e=this.tryEntries[r];if(e.finallyLoc===t)return this.complete(e.completion,e.afterLoc),N(e),m}},catch:function(t){for(var r=this.tryEntries.length-1;r>=0;--r){var e=this.tryEntries[r];if(e.tryLoc===t){var n=e.completion;if("throw"===n.type){var o=n.arg;N(e)}return o}}throw Error("illegal catch attempt")},delegateYield:function(r,e,n){return this.delegate={iterator:G(r),resultName:e,nextLoc:n},"next"===this.method&&(this.arg=t),m}},n}function n(t,r,e,n,o,i,a){try{var c=t[i](a),u=c.value}catch(t){return void e(t)}c.done?r(u):Promise.resolve(u).then(n,o)}t.exports=function(){var t,r=(t=e().mark((function t(r,n){return e().wrap((function(t){for(;;)switch(t.prev=t.next){case 0:r.postMessage(n);case 1:case"end":return t.stop()}}),t)})),function(){var r=this,e=arguments;return new Promise((function(o,i){var a=t.apply(r,e);function c(t){n(a,o,i,c,u,"next",t)}function u(t){n(a,o,i,c,u,"throw",t)}c(void 0)}))});return function(t,e){return r.apply(this,arguments)}}()},830:(t,r,e)=>{"use strict";function n(t){return n="function"==typeof Symbol&&"symbol"==typeof Symbol.iterator?function(t){return typeof t}:function(t){return t&&"function"==typeof Symbol&&t.constructor===Symbol&&t!==Symbol.prototype?"symbol":typeof t},n(t)}function o(t,r){var e=Object.keys(t);if(Object.getOwnPropertySymbols){var n=Object.getOwnPropertySymbols(t);r&&(n=n.filter((function(r){return Object.getOwnPropertyDescriptor(t,r).enumerable}))),e.push.apply(e,n)}return e}function i(t){for(var r=1;r<arguments.length;r++){var e=null!=arguments[r]?arguments[r]:{};r%2?o(Object(e),!0).forEach((function(r){a(t,r,e[r])})):Object.getOwnPropertyDescriptors?Object.defineProperties(t,Object.getOwnPropertyDescriptors(e)):o(Object(e)).forEach((function(r){Object.defineProperty(t,r,Object.getOwnPropertyDescriptor(e,r))}))}return t}function a(t,r,e){return(r=function(t){var r=function(t){if("object"!=n(t)||!t)return t;var r=t[Symbol.toPrimitive];if(void 0!==r){var e=r.call(t,"string");if("object"!=n(e))return e;throw new TypeError("@@toPrimitive must return a primitive value.")}return String(t)}(t);return"symbol"==n(r)?r:r+""}(r))in t?Object.defineProperty(t,r,{value:e,enumerable:!0,configurable:!0,writable:!0}):t[r]=e,t}var c=e(330).rE,u=e(286);t.exports=i(i({},u),{},{workerPath:"https://cdn.jsdelivr.net/npm/tesseract.js@v".concat(c,"/dist/worker.min.js")})},862:t=>{"use strict";t.exports=function(t){t.terminate()}},877:(t,r,e)=>{"use strict";function n(t){return n="function"==typeof Symbol&&"symbol"==typeof Symbol.iterator?function(t){return typeof t}:function(t){return t&&"function"==typeof Symbol&&t.constructor===Symbol&&t!==Symbol.prototype?"symbol":typeof t},n(t)}function o(t,r){var e=Object.keys(t);if(Object.getOwnPropertySymbols){var n=Object.getOwnPropertySymbols(t);r&&(n=n.filter((function(r){return Object.getOwnPropertyDescriptor(t,r).enumerable}))),e.push.apply(e,n)}return e}function i(t,r,e){return(r=function(t){var r=function(t){if("object"!=n(t)||!t)return t;var r=t[Symbol.toPrimitive];if(void 0!==r){var e=r.call(t,"string");if("object"!=n(e))return e;throw new TypeError("@@toPrimitive must return a primitive value.")}return String(t)}(t);return"symbol"==n(r)?r:r+""}(r))in t?Object.defineProperty(t,r,{value:e,enumerable:!0,configurable:!0,writable:!0}):t[r]=e,t}e(30);var a=e(364),c=e(603),u=e(535),f=e(192),s=e(972),l=e(971),h=e(65).setLogging;t.exports=function(t){for(var r=1;r<arguments.length;r++){var e=null!=arguments[r]?arguments[r]:{};r%2?o(Object(e),!0).forEach((function(r){i(t,r,e[r])})):Object.getOwnPropertyDescriptors?Object.defineProperties(t,Object.getOwnPropertyDescriptors(e)):o(Object(e)).forEach((function(r){Object.defineProperty(t,r,Object.getOwnPropertyDescriptor(e,r))}))}return t}({languages:f,OEM:s,PSM:l,createScheduler:a,createWorker:c,setLogging:h},u)},910:(t,r,e)=>{"use strict";var n=e(70),o=0;t.exports=function(t){var r=t.id,e=t.action,i=t.payload,a=void 0===i?{}:i,c=r;return void 0===c&&(c=n("Job",o),o+=1),{id:c,action:e,payload:a}}},938:t=>{"use strict";function r(t){return r="function"==typeof Symbol&&"symbol"==typeof Symbol.iterator?function(t){return typeof t}:function(t){return t&&"function"==typeof Symbol&&t.constructor===Symbol&&t!==Symbol.prototype?"symbol":typeof t},r(t)}t.exports=function(t){var e={};return"undefined"!=typeof WorkerGlobalScope?e.type="webworker":"object"===("undefined"==typeof document?"undefined":r(document))?e.type="browser":"object"===("undefined"==typeof process?"undefined":r(process))&&(e.type="node"),void 0===t?e:e[t]}},971:t=>{"use strict";t.exports={OSD_ONLY:"0",AUTO_OSD:"1",AUTO_ONLY:"2",AUTO:"3",SINGLE_COLUMN:"4",SINGLE_BLOCK_VERT_TEXT:"5",SINGLE_BLOCK:"6",SINGLE_LINE:"7",SINGLE_WORD:"8",CIRCLE_WORD:"9",SINGLE_CHAR:"10",SPARSE_TEXT:"11",SPARSE_TEXT_OSD:"12",RAW_LINE:"13"}},972:t=>{"use strict";t.exports={TESSERACT_ONLY:0,LSTM_ONLY:1,TESSERACT_LSTM_COMBINED:2,DEFAULT:3}}},r={};function e(n){var o=r[n];if(void 0!==o)return o.exports;var i=r[n]={id:n,loaded:!1,exports:{}};return t[n].call(i.exports,i,i.exports,e),i.loaded=!0,i.exports}return e.nmd=t=>(t.paths=[],t.children||(t.children=[]),t),e(877)})()));
+//# sourceMappingURL=tesseract.min.js.map
+</script>
+<script>/* ocr.js */
+/* Text recognition (OCR) for scanned pages, in English, Malay and Chinese.
+ *
+ * Uses Tesseract (tesseract.js, Apache-2.0) running locally in WebAssembly.
+ * For each page it returns:
+ *   - an invisible text layer as a small PDF page, placed over the scan to
+ *     make the PDF searchable and selectable, and readable by the converter;
+ *   - the recognised text and an overall confidence score.
+ *
+ * Where the files come from:
+ *   - desktop app or served over http(s): the copies in vendor/ocr (offline);
+ *   - a page opened straight from disk in a browser (file://), where browsers
+ *     block loading these files: the same versions from the jsDelivr CDN.
+ */
+(() => {
+  'use strict';
+
+  const LANGUAGES = [
+    { code: 'eng', label: 'English' },
+    { code: 'msa', label: 'Malay' },
+    { code: 'chi_sim', label: 'Chinese (Simplified)' },
+    { code: 'chi_tra', label: 'Chinese (Traditional)' },
+  ];
+  const DPI = 300;
+  const MAX_SIDE = 5000; // pixels; keeps memory in check for large pages
+
+  const local = location.protocol !== 'file:' || !!window.desktop;
+  const PATHS = local
+    ? { workerPath: 'vendor/ocr/worker.min.js', corePath: 'vendor/ocr', langPath: 'vendor/ocr/lang' }
+    : {}; // tesseract.js defaults: matching versions on cdn.jsdelivr.net
+
+  function loadScript(src) {
+    return new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = src;
+      s.onload = resolve;
+      s.onerror = () => reject(new Error('Could not load the text recognition engine (' + src + ')'));
+      document.head.appendChild(s);
+    });
+  }
+
+  let worker = null, workerLangs = '', progressHandler = null;
+
+  async function getWorker(langs) {
+    const key = langs.join('+');
+    if (worker && workerLangs === key) return worker;
+    if (worker) { await worker.terminate(); worker = null; }
+    if (!window.Tesseract) await loadScript('vendor/ocr/tesseract.min.js');
+    worker = await Tesseract.createWorker(langs, 1 /* LSTM engine */, {
+      ...PATHS,
+      cacheMethod: local ? 'none' : 'write', // the CDN version is kept for offline use next time
+      logger: (m) => { if (progressHandler && m.status === 'recognizing text') progressHandler(m.progress); },
+      errorHandler: () => {},
+    });
+    workerLangs = key;
+    return worker;
+  }
+
+  // Grey or yellowed paper → white paper: scale brightness so the paper's
+  // level becomes white, keeping black at black so letter shapes don't
+  // change. (Recognition works in shades of grey, so colour isn't needed.)
+  function whitenPaper(ctx, w, h) {
+    const img = ctx.getImageData(0, 0, w, h);
+    const d = img.data;
+    const hist = new Uint32Array(256);
+    const lum = new Uint8Array(w * h);
+    for (let i = 0, j = 0; j < lum.length; i += 4, j++) { lum[j] = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114; hist[lum[j]]++; }
+    let n = 0, paper = 255;
+    for (let v = 0; v < 256; v++) { n += hist[v]; if (n >= 0.6 * lum.length) { paper = v; break; } } // most of a page is paper
+    const k = 255 / Math.max(96, paper); // don't over-brighten very dark pages
+    for (let i = 0, j = 0; j < lum.length; i += 4, j++) d[i] = d[i + 1] = d[i + 2] = Math.min(255, lum[j] * k);
+    ctx.putImageData(img, 0, 0);
+  }
+
+  // Erase long straight lines (table rules, underlines, borders) from a
+  // black-and-white copy of the page: they confuse recognition, and real
+  // letters are never this long.
+  function removeLines(ctx, w, h, grow = 3) {
+    const img = ctx.getImageData(0, 0, w, h);
+    const d = img.data;
+    const dark = new Uint8Array(w * h);
+    for (let i = 0, j = 0; j < dark.length; i += 4, j++) dark[j] = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114 < 150 ? 1 : 0;
+    const minRun = Math.round(DPI * 0.55); // 14 mm
+    const erase = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) {
+      let start = -1;
+      for (let x = 0; x <= w; x++) {
+        const on = x < w && dark[y * w + x];
+        if (on && start < 0) start = x;
+        if (!on && start >= 0) { if (x - start >= minRun) for (let k = start; k < x; k++) erase[y * w + k] = 1; start = -1; }
+      }
+    }
+    for (let x = 0; x < w; x++) {
+      let start = -1;
+      for (let y = 0; y <= h; y++) {
+        const on = y < h && dark[y * w + x];
+        if (on && start < 0) start = y;
+        if (!on && start >= 0) { if (y - start >= minRun) for (let k = start; k < y; k++) erase[k * w + x] = 1; start = -1; }
+      }
+    }
+    // Widen in every direction to catch the soft, grey edges of the lines,
+    // which would otherwise be read as | or ] marks.
+    const out = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      if (!erase[y * w + x]) continue;
+      for (let dy = -grow; dy <= grow; dy++) {
+        const yy = y + dy;
+        if (yy < 0 || yy >= h) continue;
+        for (let dx = -grow; dx <= grow; dx++) { const xx = x + dx; if (xx >= 0 && xx < w) out[yy * w + xx] = 1; }
+      }
+    }
+    for (let j = 0, i = 0; j < out.length; j++, i += 4) if (out[j]) d[i] = d[i + 1] = d[i + 2] = 255;
+    ctx.putImageData(img, 0, 0);
+  }
+
+  // How many degrees the text is tilted (scans are rarely perfectly straight).
+  // Tries angles and keeps the one where text lines line up best, i.e. where
+  // the rows of dark pixels form the sharpest peaks.
+  function measureTilt(canvas) {
+    const scale = Math.min(1, 1000 / canvas.width);
+    const w = Math.round(canvas.width * scale), h = Math.round(canvas.height * scale);
+    const small = document.createElement('canvas');
+    small.width = w; small.height = h;
+    const ctx = small.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(canvas, 0, 0, w, h);
+    const d = ctx.getImageData(0, 0, w, h).data;
+    const xs = [], ys = [];
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      if (d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114 < 128) { xs.push(x); ys.push(y); }
+    }
+    if (xs.length < 200) return 0;
+    const score = (deg) => {
+      const t = Math.tan((deg * Math.PI) / 180);
+      const rows = new Float64Array(h * 2);
+      for (let k = 0; k < xs.length; k++) { const r = Math.round(ys[k] - xs[k] * t) + h / 2; if (r >= 0 && r < rows.length) rows[r]++; }
+      let s = 0;
+      for (let r = 1; r < rows.length; r++) s += (rows[r] - rows[r - 1]) ** 2;
+      return s;
+    };
+    let best = 0, bestScore = score(0);
+    for (let a = -5; a <= 5; a += 0.25) { const sc = score(a); if (sc > bestScore) { bestScore = sc; best = a; } }
+    for (let a = best - 0.25; a <= best + 0.25; a += 0.05) { const sc = score(a); if (sc > bestScore) { bestScore = sc; best = a; } }
+    return Math.abs(best) < 0.1 ? 0 : Math.round(best * 100) / 100;
+  }
+
+  // canvas: the page at roughly 300 DPI. Returns { pdf, text, confidence, tilt }
+  // where tilt (degrees) is how much the scan was straightened before reading.
+  async function recognize(canvas, { langs, onProgress = () => {}, grow }) {
+    if (!langs || !langs.length) throw new Error('Choose at least one language.');
+    const w = await getWorker(langs);
+    const tilt = measureTilt(canvas);
+    const copy = document.createElement('canvas');
+    copy.width = canvas.width;
+    copy.height = canvas.height;
+    const ctx = copy.getContext('2d', { willReadFrequently: true });
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, copy.width, copy.height);
+    // Straighten around the centre (the text layer is tilted back to match when placed).
+    ctx.translate(copy.width / 2, copy.height / 2);
+    ctx.rotate((-tilt * Math.PI) / 180);
+    ctx.translate(-copy.width / 2, -copy.height / 2);
+    ctx.drawImage(canvas, 0, 0);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    whitenPaper(ctx, copy.width, copy.height);
+    removeLines(ctx, copy.width, copy.height, grow);
+    progressHandler = onProgress;
+    try {
+      const res = await w.recognize(copy, { pdfTitle: 'OCR', pdfTextOnly: true }, { text: true, pdf: true });
+      const pdf = await joinChineseWords(new Uint8Array(res.data.pdf));
+      return { pdf, text: res.data.text, confidence: res.data.confidence, tilt };
+    } finally {
+      progressHandler = null;
+    }
+  }
+
+  // Tesseract ends every word with a space, and its word widths don't match
+  // the gaps between words, so PDF readers guess where words break. That is
+  // fine for English and Malay, but Chinese is written without spaces: a
+  // search for "年度" must not have to match "年 度". So for Chinese words we
+  // drop the trailing space and make each word exactly as wide as the step
+  // to the next word on the line, so they join up.
+  const isCJKCode = (c) => (c >= 0x2e80 && c <= 0x2fdf) || (c >= 0x3000 && c <= 0x30ff) || (c >= 0x3400 && c <= 0x4dbf) ||
+    (c >= 0x4e00 && c <= 0x9fff) || (c >= 0xf900 && c <= 0xfaff) || (c >= 0xff00 && c <= 0xffef);
+  const GLYPH_WIDTH = 0.5; // every glyph of Tesseract's text-layer font is half an em wide
+
+  function joinWords(text) {
+    // "/f 65 Tf" sets the size; each word is "<stretch> Tz [ <codes> ] TJ",
+    // usually followed by "<dx> <dy> Td" to the next word.
+    const re = /\/\S+ ([\d.]+) Tf|([\d.]+) Tz \[ <((?:[0-9A-Fa-f]{4})+)> \] TJ(?:\s+([-\d.]+) ([-\d.]+) Td)?/g;
+    const words = [];
+    let size = 12, m;
+    while ((m = re.exec(text))) {
+      if (m[1]) { size = parseFloat(m[1]); continue; }
+      const codes = m[3].match(/.{4}/g).map((h) => parseInt(h, 16));
+      words.push({ start: m.index, end: m.index + m[0].length, raw: m[0], tz: parseFloat(m[2]), codes, size,
+        dx: m[4] != null ? parseFloat(m[4]) : null, dy: m[5] != null ? parseFloat(m[5]) : null });
+    }
+    // Drop the trailing space after Chinese words.
+    for (const w of words) {
+      w.cjkEnd = w.codes.length > 1 && w.codes[w.codes.length - 1] === 0x20 && isCJKCode(w.codes[w.codes.length - 2]);
+      w.out = w.cjkEnd ? w.codes.slice(0, -1) : w.codes;
+      w.width = (w.codes.length * GLYPH_WIDTH * w.size * w.tz) / 100; // as Tesseract drew it
+    }
+    // Write each run of Chinese words on a line as ONE piece of text spanning
+    // the same width, so readers can't split it into separate words.
+    let out = '', pos = 0, changed = false;
+    for (let i = 0; i < words.length; i++) {
+      const first = words[i];
+      if (!first.cjkEnd) continue;
+      let j = i;
+      while (j + 1 < words.length) {
+        const w = words[j], next = words[j + 1];
+        const sameLine = w.dx != null && w.dx > 0 && Math.abs(w.dy) < w.size * 0.5;
+        const adjacent = /^\s*$/.test(text.slice(w.end, next.start)) && next.size === w.size &&
+          w.dx - w.out.length * w.size < w.size; // not across a wide gap (e.g. between table columns)
+        if (!(w.cjkEnd && sameLine && adjacent && isCJKCode(next.codes[0]))) break;
+        j++;
+      }
+      const group = words.slice(i, j + 1);
+      const last = group[group.length - 1];
+      const steps = group.slice(0, -1).reduce((s, w) => s + w.dx, 0);
+      const width = steps + (last.cjkEnd ? last.width * (last.out.length / last.codes.length) : last.width);
+      const codes = group.flatMap((w) => w.out);
+      const tz = (100 * width) / (codes.length * GLYPH_WIDTH * first.size);
+      const hex = codes.map((c) => c.toString(16).toUpperCase().padStart(4, '0')).join('');
+      // The move to the next word was relative to the last word: add up the steps.
+      const move = last.dx != null ? ` ${(steps + last.dx).toFixed(3)} ${group.reduce((s, w) => s + (w.dy || 0), 0).toFixed(3)} Td` : '';
+      out += text.slice(pos, first.start) + `${tz.toFixed(3)} Tz [ <${hex}> ] TJ${move}`;
+      pos = last.end;
+      changed = true;
+      i = j;
+    }
+    return changed ? out + text.slice(pos) : text;
+  }
+
+  async function joinChineseWords(bytes) {
+    const { PDFDocument, PDFRawStream, decodePDFRawStream } = PDFLib;
+    const doc = await PDFDocument.load(bytes);
+    let changed = false;
+    for (const [ref, obj] of doc.context.enumerateIndirectObjects()) {
+      if (!(obj instanceof PDFRawStream)) continue;
+      let text;
+      try { text = new TextDecoder('latin1').decode(decodePDFRawStream(obj).decode()); } catch { continue; }
+      if (!/\bTJ\b/.test(text)) continue;
+      const fixed = joinWords(text);
+      if (fixed !== text) {
+        doc.context.assign(ref, doc.context.flateStream(Uint8Array.from(fixed, (ch) => ch.charCodeAt(0))));
+        changed = true;
+      }
+    }
+    return changed ? doc.save({ useObjectStreams: false }) : bytes;
+  }
+
+  // Free the memory (about 100 MB with Chinese) once recognition is done.
+  async function release() {
+    if (worker) { await worker.terminate().catch(() => {}); worker = null; workerLangs = ''; }
+  }
+
+  const api = { LANGUAGES, DPI, MAX_SIDE, recognize, release };
+  window.PdfOcr = api;
 })();
 
 </script>
@@ -2186,6 +2506,9 @@ window.QPDF_WASM_BASE64 = 'AGFzbQEAAAABwQVWYAF/AX9gAX8AYAJ/fwBgAn9/AX9gA39/fwBgA
   let pendingStamp = null;   // signature waiting to be placed: { imageId, w, h }
   let hoverChunk = null;     // existing text under the mouse in "Edit text" mode
   const chunkCache = new Map(); // "src:page" -> text chunks of an original page
+  // Recognised text (OCR) per page id: { pdf: invisible text layer, rotation, langs }.
+  // Kept outside the undo history; page ids survive undo/redo.
+  const ocrLayers = new Map();
 
   // ---------- DOM ----------
   const $ = (id) => document.getElementById(id);
@@ -2431,17 +2754,22 @@ window.QPDF_WASM_BASE64 = 'AGFzbQEAAAABwQVWYAF/AX9gAX8AYAJ/fwBgAn9/AX9gA39/fwBgA
       loaded.pages.forEach((p) => { p.src = 0; });
       images.clear();
       chunkCache.clear();
+      ocrLayers.clear();
       pages = loaded.pages;
       fileName = file.name;
+      document.title = file.name + ' – PDF Editor';
       savePassword = loaded.password; // a locked file stays locked when downloaded
       updatePasswordButton();
       undoStack = []; redoStack = []; dirty = false; selection = null;
       zoom = fitZoom();
       renderAll();
       const n = `${pages.length} page${pages.length === 1 ? '' : 's'}`;
+      const scanned = pages.filter(needsOcr).length;
       status(loaded.password
         ? `Opened ${file.name} (${n}). It's password protected: the downloaded copy keeps the same password (change it with the Password button).`
-        : `Opened ${file.name} (${n})`, loaded.password ? 7000 : 2500);
+        : scanned
+          ? `Opened ${file.name} (${n}). ${scanned === pages.length ? 'It is scanned' : scanned + ' page' + (scanned === 1 ? ' is' : 's are') + ' scanned'}: click Recognize text to make it searchable and convertible.`
+          : `Opened ${file.name} (${n})`, loaded.password || scanned ? 7000 : 2500);
     } catch (err) {
       if (err instanceof Cancelled) return status('Opening cancelled');
       console.error(err);
@@ -2471,7 +2799,9 @@ window.QPDF_WASM_BASE64 = 'AGFzbQEAAAABwQVWYAF/AX9gAX8AYAJ/fwBgAn9/AX9gA39/fwBgA
     images.clear();
     pages = [{ id: uid(), src: null, srcPage: 0, rotation: 0, view: BLANK_SIZE.slice(), annots: [] }];
     fileName = 'document.pdf';
+    document.title = 'PDF Editor';
     chunkCache.clear();
+    ocrLayers.clear();
     savePassword = '';
     updatePasswordButton();
     undoStack = []; redoStack = []; dirty = false; selection = null;
@@ -3438,6 +3768,8 @@ window.QPDF_WASM_BASE64 = 'AGFzbQEAAAABwQVWYAF/AX9gAX8AYAJ/fwBgAn9/AX9gA39/fwBgA
         p = out.addPage(copied.get(page.src + ':' + page.srcPage));
       }
       p.setRotation(degrees(page.rotation));
+      const layer = ocrLayers.get(page.id);
+      if (layer) await addTextLayer(out, p, page, layer);
 
       for (const a of page.annots) {
         if (skipWatermarks && a.watermark) continue;
@@ -3476,6 +3808,27 @@ window.QPDF_WASM_BASE64 = 'AGFzbQEAAAABwQVWYAF/AX9gAX8AYAJ/fwBgAn9/AX9gA39/fwBgA
     return out.save();
   }
 
+  // Place a recognised-text layer back onto the page. The layer was made for
+  // the page as it was shown (rotated by layer.rotation) and straightened by
+  // layer.tilt degrees, so: scale it to the page, tilt it back around the
+  // centre, then turn it from "as shown" into the page's own coordinates.
+  async function addTextLayer(out, p, page, layer) {
+    const { pushGraphicsState, popGraphicsState, concatTransformationMatrix, drawObject } = PDFLib;
+    const emb = (await out.embedPdf(layer.pdf, [0]))[0];
+    const [x0, y0, x1, y1] = page.view;
+    const W = x1 - x0, H = y1 - y0, R = layer.rotation;
+    const dw = R % 180 ? H : W, dh = R % 180 ? W : H; // size as shown
+    const mul = (m, n) => [m[0] * n[0] + m[2] * n[1], m[1] * n[0] + m[3] * n[1], m[0] * n[2] + m[2] * n[3],
+      m[1] * n[2] + m[3] * n[3], m[0] * n[4] + m[2] * n[5] + m[4], m[1] * n[4] + m[3] * n[5] + m[5]];
+    const toPage = { 0: [1, 0, 0, 1, x0, y0], 90: [0, 1, -1, 0, x0 + W, y0], 180: [-1, 0, 0, -1, x0 + W, y0 + H], 270: [0, -1, 1, 0, x0, y0 + H] }[R];
+    const a = (-(layer.tilt || 0) * Math.PI) / 180, c = Math.cos(a), s = Math.sin(a); // undo the straightening
+    const tiltBack = mul(mul([1, 0, 0, 1, dw / 2, dh / 2], [c, s, -s, c, 0, 0]), [1, 0, 0, 1, -dw / 2, -dh / 2]);
+    const scale = [dw / emb.width, 0, 0, dh / emb.height, 0, 0];
+    const m = mul(mul(toPage, tiltBack), scale);
+    const name = p.node.newXObject('OcrText', emb.ref); // pdf-lib writes the layer into the file when saving
+    p.pushOperators(pushGraphicsState(), concatTransformationMatrix(...m), drawObject(name), popGraphicsState());
+  }
+
   function downloadBlob(blob, name) {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -3487,6 +3840,8 @@ window.QPDF_WASM_BASE64 = 'AGFzbQEAAAABwQVWYAF/AX9gAX8AYAJ/fwBgAn9/AX9gA39/fwBgA
   }
 
   const baseName = () => fileName.replace(/\.pdf$/i, '');
+  // The desktop app asks where to save; the browser downloads straight away.
+  const DONE = window.desktop ? 'Ready to save' : 'Downloaded';
 
   // Lock the file if a password is set.
   const protect = async (bytes) => (savePassword ? PdfSecurity.encrypt(bytes, savePassword) : bytes);
@@ -3497,8 +3852,8 @@ window.QPDF_WASM_BASE64 = 'AGFzbQEAAAABwQVWYAF/AX9gAX8AYAJ/fwBgAn9/AX9gA39/fwBgA
     try {
       const bytes = await protect(await buildPdf());
       downloadBlob(new Blob([bytes], { type: 'application/pdf' }), baseName() + '-edited.pdf');
-      dirty = false;
-      status('Downloaded ' + baseName() + '-edited.pdf' + (savePassword ? ' (password protected)' : ''));
+      if (!window.desktop) dirty = false;
+      status(DONE + ' ' + baseName() + '-edited.pdf' + (savePassword ? ' (password protected)' : ''));
     } catch (err) {
       console.error(err);
       status('Could not save: ' + (err.message || err), 6000);
@@ -3508,17 +3863,27 @@ window.QPDF_WASM_BASE64 = 'AGFzbQEAAAABwQVWYAF/AX9gAX8AYAJ/fwBgAn9/AX9gA39/fwBgA
   // ---------- Convert to Word / Excel / OpenDocument ----------
   // Only possible when the PDF has real text. Scanned PDFs (pictures of
   // text) and documents made only of blank pages have none.
-  const hasText = () => pages.some((p) => p.src != null && sources[p.src].textPages.has(p.srcPage));
-  const NO_TEXT = 'Converting needs a PDF with real text. This one has none (for example, a scanned PDF, where the text is a picture).';
+  // A page needs OCR when it comes from a PDF but has no real text (a scan)
+  // and hasn't been recognised yet.
+  const needsOcr = (p) => p.src != null && !sources[p.src].textPages.has(p.srcPage) && !ocrLayers.has(p.id);
+  const hasText = () => pages.some((p) => (p.src != null && sources[p.src].textPages.has(p.srcPage)) || ocrLayers.has(p.id));
+  const NO_TEXT = 'Converting needs a PDF with text. This one has none: if it is scanned, click Recognize text first.';
 
   function updateConvertButton() {
     const btn = $('convertBtn');
-    btn.disabled = !hasText();
-    btn.title = !pages.length || hasText() ? 'Convert to Word, Excel or OpenDocument' : NO_TEXT;
+    const scanned = pages.filter(needsOcr).length;
+    btn.disabled = !hasText() && !scanned;
+    btn.title = !pages.length || hasText() || scanned ? 'Convert to Word, Excel or OpenDocument' : NO_TEXT;
+    const ocr = $('ocrBtn');
+    ocr.disabled = !scanned;
+    ocr.textContent = scanned || !pages.some((p) => ocrLayers.has(p.id)) ? 'Recognize text' : '✓ Text recognized';
+    ocr.classList.toggle('attention', scanned > 0 && !hasText());
   }
 
   function openConvertDialog() {
     if (!pages.length) return;
+    // Scanned pages are recognised first, then the Convert dialog opens.
+    if (pages.some(needsOcr)) return openOcrDialog(openConvertDialog, 'This PDF is scanned, so its text needs to be recognized before converting.');
     if (!hasText()) return status(NO_TEXT, 6000);
     closeTextEditor();
     $('convertError').textContent = '';
@@ -3569,7 +3934,7 @@ window.QPDF_WASM_BASE64 = 'AGFzbQEAAAABwQVWYAF/AX9gAX8AYAJ/fwBgAn9/AX9gA39/fwBgA
       });
       const name = baseName() + '.' + format;
       downloadBlob(blob, name);
-      status('Downloaded ' + name, 4000);
+      status(DONE + ' ' + name, 4000);
     } catch (err) {
       console.error(err);
       status(err.code === 'no-text' ? NO_TEXT : 'Could not convert: ' + (err.message || err), 6000);
@@ -3578,6 +3943,100 @@ window.QPDF_WASM_BASE64 = 'AGFzbQEAAAABwQVWYAF/AX9gAX8AYAJ/fwBgAn9/AX9gA39/fwBgA
 
   // Kept for scripts and tests: convert all pages straight away.
   const exportAs = (format) => convertTo(format);
+
+  // ---------- Recognize text (OCR) ----------
+  const OCR_LANGS_KEY = 'pdfEditor.ocrLanguages';
+  let afterOcr = null;
+
+  function openOcrDialog(then = null, note = '') {
+    const todo = pages.filter(needsOcr);
+    if (!todo.length) return then ? then() : status('There are no scanned pages to recognize.');
+    closeTextEditor();
+    afterOcr = then;
+    let chosen;
+    try { chosen = JSON.parse(localStorage.getItem(OCR_LANGS_KEY) || 'null'); } catch { chosen = null; }
+    if (!Array.isArray(chosen) || !chosen.length) chosen = ['eng', 'msa'];
+    $('ocrLangs').innerHTML = PdfOcr.LANGUAGES.map((l) =>
+      `<label class="check"><input type="checkbox" name="ocrLang" value="${l.code}"${chosen.includes(l.code) ? ' checked' : ''}> ${l.label}</label>`).join('');
+    $('ocrInfo').textContent = (note ? note + ' ' : '') +
+      `${todo.length} scanned page${todo.length === 1 ? '' : 's'} to recognize. The text is added invisibly behind the scan, so the PDF becomes searchable and can be converted to Word or Excel.`;
+    $('ocrError').textContent = '';
+    $('ocrDialog').showModal();
+  }
+
+  async function runOcr() {
+    const langs = [...$('ocrDialog').querySelectorAll('input[name=ocrLang]:checked')].map((c) => c.value);
+    if (!langs.length) { $('ocrError').textContent = 'Choose at least one language.'; return; }
+    try { localStorage.setItem(OCR_LANGS_KEY, JSON.stringify(langs)); } catch {}
+    $('ocrDialog').close();
+    const todo = pages.filter(needsOcr);
+    let stop = false, done = 0, lowConfidence = 0;
+    const progress = showProgress('Recognizing text', () => { stop = true; });
+    try {
+      for (const page of todo) {
+        if (stop) break;
+        const label = `Page ${pages.indexOf(page) + 1} (${done + 1} of ${todo.length})`;
+        progress(done / todo.length, label + ': preparing…');
+        const canvas = await renderForOcr(page);
+        const res = await PdfOcr.recognize(canvas, {
+          langs,
+          onProgress: (p) => progress((done + p) / todo.length, `${label}: ${Math.round(p * 100)}%`),
+        });
+        ocrLayers.set(page.id, { pdf: res.pdf, rotation: page.rotation, tilt: res.tilt, langs });
+        if (res.confidence < 60) lowConfidence++;
+        done++;
+      }
+    } catch (err) {
+      console.error(err);
+      closeProgress();
+      return status('Text recognition failed: ' + (err.message || err), 8000);
+    } finally {
+      PdfOcr.release();
+    }
+    closeProgress();
+    if (done) dirty = true;
+    updateButtons();
+    const msg = stop
+      ? `Stopped after ${done} of ${todo.length} pages. Click Recognize text to continue.`
+      : `Text recognized on ${done} page${done === 1 ? '' : 's'}. ${window.desktop ? 'Save' : 'Download'} it to get a searchable PDF, or Convert it to Word or Excel.` +
+        (lowConfidence ? ` ${lowConfidence} page${lowConfidence === 1 ? ' was' : 's were'} hard to read, so check the result.` : '');
+    status(msg, 8000);
+    const then = afterOcr;
+    afterOcr = null;
+    if (then && !stop && done) then();
+  }
+
+  // The page as shown (with its rotation), at about 300 DPI.
+  async function renderForOcr(page) {
+    const p = await getPdfjsPage(sources[page.src], page.srcPage);
+    let scale = PdfOcr.DPI / 72;
+    const base = p.getViewport({ scale: 1, rotation: page.rotation });
+    scale = Math.min(scale, PdfOcr.MAX_SIDE / Math.max(base.width, base.height));
+    const vp = p.getViewport({ scale, rotation: page.rotation });
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(vp.width);
+    canvas.height = Math.round(vp.height);
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    await p.render({ canvasContext: ctx, viewport: vp }).promise;
+    return canvas;
+  }
+
+  // A progress window; returns update(fraction, text). onStop is called by the Stop button.
+  function showProgress(title, onStop) {
+    $('progressTitle').textContent = title;
+    $('progressBar').value = 0;
+    $('progressText').textContent = '';
+    $('progressStop').disabled = false;
+    $('progressStop').onclick = () => { $('progressStop').disabled = true; $('progressText').textContent = 'Stopping after this page…'; onStop(); };
+    if (!$('progressDialog').open) $('progressDialog').showModal();
+    return (fraction, text) => {
+      $('progressBar').value = Math.max(0, Math.min(1, fraction));
+      if (!$('progressStop').disabled) $('progressText').textContent = text;
+    };
+  }
+  const closeProgress = () => { if ($('progressDialog').open) $('progressDialog').close(); };
 
   // ---------- Split / extract pages ----------
   // "1-3, 5, 8-" -> [0, 1, 2, 4, 7, …]; throws a readable message if invalid.
@@ -3620,7 +4079,7 @@ window.QPDF_WASM_BASE64 = 'AGFzbQEAAAABwQVWYAF/AX9gAX8AYAJ/fwBgAn9/AX9gA39/fwBgA
         const bytes = await protect(await buildPdf({ list: idx.map((i) => pages[i]) }));
         const name = `${base}-pages-${label}.pdf`;
         downloadBlob(new Blob([bytes], { type: 'application/pdf' }), name);
-        status(`Downloaded ${name} (${idx.length} page${idx.length === 1 ? '' : 's'})`);
+        status(`${DONE} ${name} (${idx.length} page${idx.length === 1 ? '' : 's'})`);
       } else {
         const every = Math.floor(+$('splitEvery').value);
         if (!(every >= 1)) throw new Error('Enter how many pages each file should have (1 or more).');
@@ -3639,10 +4098,10 @@ window.QPDF_WASM_BASE64 = 'AGFzbQEAAAABwQVWYAF/AX9gAX8AYAJ/fwBgAn9/AX9gA39/fwBgA
         const names = Object.keys(files);
         if (names.length === 1) {
           downloadBlob(new Blob([files[names[0]]], { type: 'application/pdf' }), names[0]);
-          status('Downloaded ' + names[0]);
+          status(DONE + ' ' + names[0]);
         } else {
           downloadBlob(PdfConvert.zip(files), `${base}-split.zip`);
-          status(`Downloaded ${names.length} PDFs in ${base}-split.zip`);
+          status(`${DONE} ${names.length} PDFs in ${base}-split.zip`);
         }
       }
     } catch (err) {
@@ -3722,6 +4181,10 @@ window.QPDF_WASM_BASE64 = 'AGFzbQEAAAABwQVWYAF/AX9gAX8AYAJ/fwBgAn9/AX9gA39/fwBgA
   });
   watermarkInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); toggleWatermark(); } });
   $('convertBtn').addEventListener('click', openConvertDialog);
+  $('ocrBtn').addEventListener('click', () => openOcrDialog());
+  $('ocrDialog').querySelector('form').addEventListener('submit', (e) => { e.preventDefault(); runOcr(); });
+  $('ocrDialog').addEventListener('close', () => { if (!$('progressDialog').open) setTimeout(() => { if (!$('progressDialog').open) afterOcr = null; }, 0); });
+  $('progressDialog').addEventListener('cancel', (e) => e.preventDefault()); // Esc doesn't hide a running job
   $('convertDialog').querySelector('form').addEventListener('submit', (e) => { e.preventDefault(); runConvert(); });
   $('convertDialog').querySelectorAll('input[name=convertFormat]').forEach((r) => r.addEventListener('change', syncConvertDialog));
   $('convertRanges').addEventListener('focus', () => { $('convertDialog').querySelector('input[name=convertPages][value=some]').checked = true; });
@@ -3729,8 +4192,7 @@ window.QPDF_WASM_BASE64 = 'AGFzbQEAAAABwQVWYAF/AX9gAX8AYAJ/fwBgAn9/AX9gA39/fwBgA
     const file = e.target.files[0];
     e.target.value = '';
     await openFile(file);
-    if (pages.length && hasText()) openConvertDialog();
-    else if (pages.length) status(NO_TEXT, 6000);
+    if (pages.length) openConvertDialog();
   });
   $('saveBtn').addEventListener('click', save);
   $('signBtn').addEventListener('click', startSignature);
@@ -3836,8 +4298,42 @@ window.QPDF_WASM_BASE64 = 'AGFzbQEAAAABwQVWYAF/AX9gAX8AYAJ/fwBgAn9/AX9gA39/fwBgA
   })();
   updateButtons();
 
+  // ---------- Desktop app ----------
+  // In the desktop app (Electron), files opened from the system ("Open with",
+  // double-click, File > Open) and menu commands arrive here.
+  if (window.desktop) {
+    document.body.classList.add('desktop');
+    $('saveBtn').textContent = 'Save as…';
+    $('saveBtn').title = 'Save the edited PDF (Ctrl+S)';
+    const asFile = (f) => new File([f.data], f.name, { type: 'application/pdf' });
+    window.desktop.onOpenFile((f) => openFile(asFile(f)));
+    window.desktop.onMergeFiles((list) => {
+      const files = list.map(asFile);
+      if (!pages.length) openFile(files.shift()).then(() => mergeFiles(files));
+      else mergeFiles(files);
+    });
+    window.desktop.onSaved((path) => {
+      if (/\.pdf$/i.test(path)) dirty = false;
+      status('Saved: ' + path, 5000);
+    });
+    const commands = {
+      save, undo, redo,
+      convert: openConvertDialog,
+      ocr: () => openOcrDialog(),
+      split: openSplitDialog,
+      password: openPasswordDialog,
+      sign: startSignature,
+      watermark: toggleWatermark,
+      zoomIn: () => pages.length && setZoom(zoom * 1.25),
+      zoomOut: () => pages.length && setZoom(zoom / 1.25),
+      newBlank: newBlankDocument,
+    };
+    window.desktop.onMenu((cmd) => { if (commands[cmd]) commands[cmd](); });
+    window.desktop.ready(); // the app may now send a file it was opened with
+  }
+
   // Exposed for automated tests.
-  window.pdfEditor = { buildPdf, exportAs, openFile, getState: () => ({ pages, zoom, tool, selection, savePassword }) };
+  window.pdfEditor = { buildPdf, exportAs, openFile, getState: () => ({ pages, zoom, tool, selection, savePassword, ocrPages: [...ocrLayers.keys()] }) };
 })();
 
 </script>
