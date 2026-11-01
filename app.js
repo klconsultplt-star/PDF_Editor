@@ -1512,6 +1512,21 @@
         p = out.addPage(copied.get(page.src + ':' + page.srcPage));
       }
       p.setRotation(degrees(page.rotation));
+      // Text replaced with Edit text or under a Whiteout box is deleted from
+      // the page itself, so it can't be found or copied in the saved file.
+      const removal = new Map(); // edit -> { removed, unsure, invisible }
+      const targets = page.src == null ? [] : page.annots.filter((a) => (a.type === 'replace' && a.cover) || a.type === 'whiteout');
+      if (targets.length) {
+        try {
+          const res = PdfRedact.removeText(out, p, targets.map((a) => {
+            const box = a.type === 'whiteout' ? a : a.cover;
+            return (x, y) => inBox(box, x, y, 0);
+          }));
+          targets.forEach((a, k) => removal.set(a, res[k]));
+        } catch (err) {
+          console.warn('Could not remove the original text', err);
+        }
+      }
       const layer = ocrLayers.get(page.id);
       if (layer) await addTextLayer(out, p, page, layer);
 
@@ -1519,7 +1534,10 @@
         if (skipWatermarks && a.watermark) continue;
         const color = a.color ? rgb(...hexToRgb(a.color)) : undefined;
         const rotate = degrees(a.rot || 0);
-        if (a.cover) {
+        // The patch is only needed where the old words couldn't all be
+        // deleted (scans, unusual fonts, hidden text over drawn letters).
+        const gone = removal.get(a);
+        if (a.cover && !(gone && gone.removed && !gone.unsure && !gone.invisible)) {
           const c = a.cover;
           p.drawRectangle({ x: c.x, y: c.y, width: c.w, height: c.h, rotate: degrees(c.rot || 0), color: rgb(...hexToRgb(c.fill)) });
         }

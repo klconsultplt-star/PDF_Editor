@@ -30,12 +30,12 @@ After changing the app's files, run `python3 build-single-file.py` to rebuild `d
 | Feature | How |
 | --- | --- |
 | Open a PDF | **Open**, or drag a PDF onto the window |
-| Edit existing text | **Edit text** tool (E): hover to see what can be edited, click a word or line, type the new text, click away to finish. The new text matches the original's font style (sans/serif/mono, bold, italic), size and colour, and the background colour is matched to hide the old words. Clear all the text to delete it. Select it and press Delete to undo the change |
+| Edit existing text | **Edit text** tool (E): hover to see what can be edited, click a word or line, type the new text, click away to finish. The new text matches the original's font style (sans/serif/mono, bold, italic), size and colour, and the old words are deleted from the page itself (everything else on the line stays exactly where it was). Clear all the text to delete it. Select it and press Delete to undo the change |
 | Add text | **Add text** tool, click where it should go, type. Click away to finish. Double-click existing added text to edit it |
 | Draw freehand | **Draw** tool |
 | Highlight an area | **Highlight** tool, drag over the area |
 | Draw a box | **Box** tool |
-| Hide existing content | **Whiteout** tool covers it with a white box (then add new text on top to "replace" text) |
+| Hide existing content | **Whiteout** tool covers it with a white box, and text under the box is deleted from the file (so it can't be copied or searched). Then add new text on top to "replace" text |
 | Watermark | Type your text in the box next to **Watermark** (default "DRAFT", remembered for next time) and click the button: a faint diagonal watermark (bold, 150 pt, 10% opacity, 45°) goes across every page. Longer text is shrunk so it still fits the page. Click again to remove it, or change the text and click to replace it |
 | Insert an image | **Image** (PNG or JPG), or drag an image onto the window |
 | Sign | **Sign** (S): draw your signature, type your name in a handwriting style, or upload a photo of it (the white background is removed). Then click where it goes on the page; move and resize it like an image. Signatures are saved in your browser for next time |
@@ -104,7 +104,7 @@ Keyboard shortcuts for tools: V select, E edit text, T add text, P draw, H highl
 
 ## Limitations
 
-- **Edit text** covers the original words and writes new ones on top, which looks like a direct edit. The original words are still inside the file underneath, so **don't use it to remove confidential information** (they can be copied out with some tools). Word/Excel/CSV export does leave them out.
+- **Edit text** and **Whiteout** delete the original text from the saved file. They don't remove pictures: text that is part of a picture (a scan, a screenshot) is only covered, so for confidential information in a scanned page, crop or replace the picture instead. In rare PDFs whose fonts use unusual encodings, the old words can't be measured; they are then covered with a patch as before (still hidden, but not deleted).
 - Edited and added text use the 12 fonts built into every PDF reader (sans, serif and mono, each in regular, bold, italic and bold italic), matched to the closest original style. A document using an unusual font will look slightly different where edited. These fonts only cover Western European characters; other characters are saved as `?`.
 - Edit text works on PDFs that contain real text. Scanned pages are pictures of text: use Whiteout and Add text there.
 - **Converting rebuilds the document** from where text and pictures sit on each page (a PDF doesn't store paragraphs or tables). Ordinary documents, reports, letters, invoices and tables convert well. Expect some tidying with: multi-column layouts (newspaper style), text in boxes beside each other, merged table cells, and charts or shapes drawn as lines (only pictures are carried over, not drawn shapes). Text running sideways is skipped.
@@ -123,6 +123,7 @@ Keyboard shortcuts for tools: V select, E edit text, T add text, P draw, H highl
 - [`ocr.js`](ocr.js): text recognition with [Tesseract](https://github.com/tesseract-ocr/tesseract) via [tesseract.js](https://github.com/naptha/tesseract.js) (Apache-2.0), running in WebAssembly. Before reading, each page is straightened, its paper whitened and long table lines erased; afterwards Chinese words are joined so searches match. The engine and the English, Malay and Chinese language data are in [`vendor/ocr`](vendor/ocr).
 - [`desktop/`](desktop): the desktop app (Electron).
 - [`compress.js`](compress.js): compression. It follows each page's drawing instructions to find how large every picture is shown, shrinks and re-saves pictures with the browser's own image tools, and repacks the file with qpdf.
+- [`redact.js`](redact.js): deletes original text for Edit text and Whiteout. It follows the page's drawing instructions to place every letter, using the widths from the PDF's fonts, and replaces the deleted letters with an equal gap.
 - [`security.js`](security.js): opening locked PDFs and password-protecting downloads, using [qpdf](https://qpdf.sourceforge.io/) (Apache-2.0) compiled to WebAssembly. It's loaded only when first needed (`vendor/qpdf.js` and `vendor/qpdf-wasm.js`, about 1.8 MB).
 - [pdf.js](https://mozilla.github.io/pdf.js/) (Apache-2.0) draws the pages; [pdf-lib](https://pdf-lib.js.org/) (MIT) writes the edited PDF. Both are bundled in [`vendor/`](vendor) so the app works offline.
 - Edits are stored in PDF coordinates while you work and are written into the original pages when you download, so the original content (text, vector graphics, fonts) is kept as is.
