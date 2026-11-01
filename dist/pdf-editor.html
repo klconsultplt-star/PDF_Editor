@@ -1940,12 +1940,45 @@ button.link { all: unset; color: var(--accent); cursor: pointer; text-decoration
     return changed ? doc.save({ useObjectStreams: false }) : bytes;
   }
 
+  // Remove recognised words from a text layer: shouldRemove(x, y, w, h) gets
+  // each word's middle point in layer units (and the layer's size). Words
+  // are positioned from the start of their line, so emptying one doesn't
+  // move the others.
+  async function removeWords(bytes, shouldRemove) {
+    const { PDFDocument, PDFRawStream, decodePDFRawStream } = PDFLib;
+    const doc = await PDFDocument.load(bytes);
+    const { width: lw, height: lh } = doc.getPage(0).getSize();
+    let changed = false;
+    for (const [ref, obj] of doc.context.enumerateIndirectObjects()) {
+      if (!(obj instanceof PDFRawStream)) continue;
+      let text;
+      try { text = new TextDecoder('latin1').decode(decodePDFRawStream(obj).decode()); } catch { continue; }
+      if (!/\bTJ\b/.test(text)) continue;
+      let tm = [1, 0, 0, 1, 0, 0], ox = 0, oy = 0, size = 12, tz = 100;
+      const N = '([-\\d.]+)';
+      const re = new RegExp(`${N} ${N} ${N} ${N} ${N} ${N} Tm|${N} ${N} Td|/\\S+ ([\\d.]+) Tf|([\\d.]+) Tz|\\[ <([0-9A-Fa-f]*)> \\] TJ`, 'g');
+      const fixed = text.replace(re, (m, a, b, c, d, e, f, dx, dy, tf, z, hex) => {
+        if (a !== undefined) { tm = [a, b, c, d, e, f].map(Number); ox = tm[4]; oy = tm[5]; }
+        else if (dx !== undefined) { ox += tm[0] * dx + tm[2] * dy; oy += tm[1] * dx + tm[3] * dy; }
+        else if (tf !== undefined) size = Number(tf);
+        else if (z !== undefined) tz = Number(z);
+        else if (hex) {
+          const wx = ((hex.length / 4) * GLYPH_WIDTH * size * tz) / 100 / 2, wy = size * 0.35; // middle of the word
+          if (shouldRemove(ox + tm[0] * wx + tm[2] * wy, oy + tm[1] * wx + tm[3] * wy, lw, lh)) { changed = true; return '[ <> ] TJ'; }
+        }
+        return m;
+      });
+      if (fixed !== text) doc.context.assign(ref, doc.context.flateStream(Uint8Array.from(fixed, (ch) => ch.charCodeAt(0))));
+    }
+    return changed ? doc.save({ useObjectStreams: false }) : bytes;
+  }
+
   // Free the memory (about 100 MB with Chinese) once recognition is done.
   async function release() {
     if (worker) { await worker.terminate().catch(() => {}); worker = null; workerLangs = ''; }
   }
 
-  const api = { LANGUAGES, DPI, MAX_SIDE, recognize, release };
+  const api = { LANGUAGES, DPI, MAX_SIDE, recognize, release, removeWords };
   window.PdfOcr = api;
 })();
 
@@ -2755,6 +2788,8 @@ window.QPDF_WASM_BASE64 = 'AGFzbQEAAAABwQVWYAF/AX9gAX8AYAJ/fwBgAn9/AX9gA39/fwBgA
       images.clear();
       chunkCache.clear();
       ocrLayers.clear();
+      sharpPage = null;
+      strokeCache.clear();
       pages = loaded.pages;
       fileName = file.name;
       document.title = file.name + ' – PDF Editor';
@@ -3409,36 +3444,64 @@ window.QPDF_WASM_BASE64 = 'AGFzbQEAAAABwQVWYAF/AX9gAX8AYAJ/fwBgAn9/AX9gA39/fwBgA
   // Editing covers the original words with a patch in the background colour
   // and writes the new words on top in a matching font, size and colour.
 
+  // On recognised (OCR) pages the text comes from the recognised-text layer.
+  const chunkKey = (page) => (ocrLayers.has(page.id) ? 'ocr:' + page.id : page.src + ':' + page.srcPage);
+
   function pageChunks(page) { // the chunks, or null while still loading
     if (page.src == null) return [];
-    const key = page.src + ':' + page.srcPage;
+    const key = chunkKey(page);
     const cached = chunkCache.get(key);
     if (Array.isArray(cached)) return cached;
     if (!cached) {
-      chunkCache.set(key, loadChunks(page.src, page.srcPage)
+      const layer = ocrLayers.get(page.id);
+      chunkCache.set(key, (layer ? loadOcrChunks(page, layer) : loadChunks(page.src, page.srcPage))
         .catch((err) => { console.error(err); return []; })
         .then((list) => { chunkCache.set(key, list); return list; }));
     }
     return null;
   }
 
-  const pageChunksAsync = async (page) => pageChunks(page) || chunkCache.get(page.src + ':' + page.srcPage);
+  const pageChunksAsync = async (page) => pageChunks(page) || chunkCache.get(chunkKey(page));
 
   async function loadChunks(srcIndex, n) {
     const tc = await (await getPdfjsPage(sources[srcIndex], n)).getTextContent();
+    return groupChunks(textItems(tc));
+  }
+
+  async function loadOcrChunks(page, layer) {
+    const doc = await pdfjsLib.getDocument({ data: layer.pdf.slice() }).promise;
+    try {
+      const p = await doc.getPage(1);
+      const [, , lw, lh] = p.view;
+      const chunks = groupChunks(textItems(await p.getTextContent(), ocrMatrix(page, layer, lw, lh)));
+      chunks.forEach((ch) => { ch.ocr = true; });
+      return chunks;
+    } finally {
+      doc.destroy();
+    }
+  }
+
+  // Text pieces in page coordinates; `m` maps them there when they come from
+  // another coordinate system (the recognised-text layer).
+  function textItems(tc, m = null) {
     // Work in each piece's own direction: u along the baseline, v across it.
     const items = [];
+    const stretch = m ? Math.hypot(m[0], m[1]) : 1;
     for (const it of tc.items) {
       // Skip spaces: pdf.js stretches them across gaps (even between table
       // columns); real word gaps are re-detected from the positions below.
       if (!it.str || !it.str.trim()) continue;
-      const [a, b, c, d, e, f] = it.transform;
+      const [a, b, c, d, e, f] = m ? mulMatrix(m, it.transform) : it.transform;
       const size = Math.hypot(c, d);
       if (!size) continue;
       const rot = Math.round((Math.atan2(b, a) * 180) / Math.PI * 10) / 10;
       const [u, v] = rotateVec(e, f, -rot);
-      items.push({ str: it.str, u, v, w: it.width, size, rot, fontName: it.fontName, family: (tc.styles[it.fontName] || {}).fontFamily });
+      items.push({ str: it.str, u, v, w: it.width * stretch, size, rot, fontName: it.fontName, family: (tc.styles[it.fontName] || {}).fontFamily });
     }
+    return items;
+  }
+
+  function groupChunks(items) {
     // Group into lines, then join neighbours on each line.
     const lines = [];
     for (const it of items) {
@@ -3453,7 +3516,7 @@ window.QPDF_WASM_BASE64 = 'AGFzbQEAAAABwQVWYAF/AX9gAX8AYAJ/fwBgAn9/AX9gA39/fwBgA
         const gap = cur ? it.u - cur.end : 0;
         const ratio = cur ? it.size / cur.size : 1;
         if (cur && gap > -cur.size * 0.5 && gap < cur.size * 1.0 && ratio > 0.75 && ratio < 1.33) {
-          if (gap > cur.size * 0.15 && !/\s$/.test(cur.str) && !/^\s/.test(it.str)) cur.str += ' ';
+          if (gap > cur.size * 0.15 && !/\s$/.test(cur.str) && !/^\s/.test(it.str) && !(isCJKChar(cur.str.slice(-1)) && isCJKChar(it.str[0]))) cur.str += ' ';
           cur.str += it.str;
           cur.end = Math.max(cur.end, it.u + it.w);
           cur.size = Math.max(cur.size, it.size);
@@ -3466,6 +3529,8 @@ window.QPDF_WASM_BASE64 = 'AGFzbQEAAAABwQVWYAF/AX9gAX8AYAJ/fwBgAn9/AX9gA39/fwBgA
     chunks.forEach((ch) => { ch.str = ch.str.replace(/\s+/g, ' ').trim(); });
     return chunks.filter((ch) => ch.str);
   }
+
+  const isCJKChar = (ch) => !!ch && /[\u2e80-\u2fdf\u3000-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]/.test(ch);
 
   // Corners of a chunk's box in its own direction (u, v), with room for
   // descenders below the baseline and capitals above it.
@@ -3509,6 +3574,7 @@ window.QPDF_WASM_BASE64 = 'AGFzbQEAAAABwQVWYAF/AX9gAX8AYAJ/fwBgAn9/AX9gA39/fwBgA
   // Closest built-in font, from the embedded font's name (e.g. "ABCDEF+Arial-BoldItalicMT").
   async function matchFont(page, ch) {
     let name = '', bold = false, italic = false;
+    if (ch.ocr) return fontKey('Helvetica', false, false); // the font of a scan can't be known
     try {
       const p = await getPdfjsPage(sources[page.src], page.srcPage);
       if (p.commonObjs.has(ch.fontName)) {
@@ -3574,26 +3640,190 @@ window.QPDF_WASM_BASE64 = 'AGFzbQEAAAABwQVWYAF/AX9gAX8AYAJ/fwBgAn9/AX9gA39/fwBgA
     return { bg: hex(bg), fg: hex(sum.map((s) => Math.round(s / n))) };
   }
 
+  // On scans, recognised word boxes can be a little smaller than the ink, so
+  // widen a chunk's box to the actual ink on the rendered page: move each
+  // edge outwards until a clear strip of paper is reached. Returns the box
+  // in the chunk's own (u, v) directions, or null if the page isn't drawn.
+  // Width of a text in ems of the standard sans font (Chinese characters ≈ 1 em).
+  function textEms(str) {
+    let ems = 0;
+    for (const c of str) {
+      if (isCJKChar(c)) { ems += 1; continue; }
+      try { ems += measureFonts.Helvetica.widthOfTextAtSize(c, 1); } catch { ems += 0.55; }
+    }
+    return ems;
+  }
+
+  // Recognised text: the height-based size counts the whole line (Chinese
+  // characters make it taller). The width of the words is measured exactly,
+  // so size the text to fill that width, within reason of the height-based size.
+  function ocrSize(ch) {
+    const ems = textEms(ch.str);
+    return ems > 0 ? Math.max(ch.size * 0.5, Math.min(ch.size * 1.15, (ch.end - ch.u) / ems)) : ch.size;
+  }
+
+  // The typical stroke thickness of the text on a recognised page (the
+  // median over its longer pieces of text), to spot bold words.
+  const strokeCache = new Map();
+  async function usualStroke(page, bg, fg) {
+    const key = page.id + ':' + page.rotation;
+    if (strokeCache.has(key)) return strokeCache.get(key);
+    const sharp = await sharpRender(page);
+    const sample = (await pageChunksAsync(page)).filter((c) => c.str.length >= 4).sort((a, b) => b.str.length - a.str.length).slice(0, 20);
+    const strokes = sample.map((c) => { const box = inkBox(page, { ...c, size: ocrSize(c) }, bg, fg, sharp); return box ? box.stroke : 0; })
+      .filter((v) => v > 0).sort((a, b) => a - b);
+    const median = strokes.length >= 3 ? strokes[Math.floor(strokes.length / 2)] : 0;
+    strokeCache.set(key, median);
+    return median;
+  }
+
+  // A sharp (300 DPI) picture of the page as shown, for measuring ink. Kept
+  // for the last page used, so editing several words there is quick.
+  let sharpPage = null; // { key, canvas, scale }
+  async function sharpRender(page) {
+    const key = page.id + ':' + page.rotation;
+    if (sharpPage && sharpPage.key === key) return sharpPage;
+    const scale = 300 / 72;
+    const canvas = document.createElement('canvas');
+    const p = await getPdfjsPage(sources[page.src], page.srcPage);
+    const vp = p.getViewport({ scale, rotation: page.rotation });
+    canvas.width = Math.round(vp.width);
+    canvas.height = Math.round(vp.height);
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    await p.render({ canvasContext: ctx, viewport: vp }).promise;
+    sharpPage = { key, canvas, scale };
+    return sharpPage;
+  }
+
+  function inkBox(page, ch, bg, fg, sharp) {
+    const canvas = sharp.canvas;
+    const vp = viewportFor(page, sharp.scale);
+    const b = chunkBox(ch, 0);
+    const corners = [[b.u0, b.v0], [b.u1, b.v0], [b.u0, b.v1], [b.u1, b.v1]].map(([u, v]) => vp.convertToViewportPoint(...rotateVec(u, v, ch.rot)));
+    const px = sharp.scale * ch.size; // one em in pixels
+    const X0 = Math.min(...corners.map((c) => c[0])), X1 = Math.max(...corners.map((c) => c[0]));
+    const Y0 = Math.min(...corners.map((c) => c[1])), Y1 = Math.max(...corners.map((c) => c[1]));
+    const left = Math.max(0, Math.floor(X0 - px)), top = Math.max(0, Math.floor(Y0 - px * 0.6));
+    const W = Math.min(canvas.width, Math.ceil(X1 + px * 1.6)) - left, H = Math.min(canvas.height, Math.ceil(Y1 + px * 0.6)) - top;
+    if (W < 4 || H < 4) return null;
+    const d = canvas.getContext('2d', { willReadFrequently: true }).getImageData(left, top, W, H).data;
+    const hexRgb = (h) => [1, 3, 5].map((k) => parseInt(h.slice(k, k + 2), 16));
+    const B = hexRgb(bg), F = hexRgb(fg);
+    const limit = Math.max(30, 0.4 * Math.hypot(F[0] - B[0], F[1] - B[1], F[2] - B[2]));
+    const mask = new Uint8Array(W * H), faint = new Uint8Array(W * H);
+    const faintLimit = Math.max(16, limit * 0.25);
+    for (let j = 0, i = 0; j < mask.length; j++, i += 4) {
+      const dist = Math.hypot(d[i] - B[0], d[i + 1] - B[1], d[i + 2] - B[2]);
+      mask[j] = dist > limit ? 1 : 0;
+      faint[j] = dist > faintLimit ? 1 : 0;
+    }
+    // Table rules and underlines: rows/columns that are mostly ink. They are
+    // borders, not part of the words, so the search stops at them. Thin lines
+    // on scans are drawn light grey, so they're found with a fainter test.
+    const ruleRow = new Uint8Array(H), ruleCol = new Uint8Array(W);
+    for (let y = 0; y < H; y++) { let n = 0; for (let x = 0; x < W; x++) n += faint[y * W + x]; ruleRow[y] = n > W * 0.55 ? 1 : 0; }
+    for (let x = 0; x < W; x++) { let n = 0; for (let y = 0; y < H; y++) n += faint[y * W + x]; ruleCol[x] = n > H * 0.55 ? 1 : 0; }
+    let x0 = Math.round(X0 - left), x1 = Math.round(X1 - left), y0 = Math.round(Y0 - top), y1 = Math.round(Y1 - top);
+    // 'stop' at a rule; otherwise whether there is text ink in that column/row.
+    const colInk = (x) => {
+      if (ruleCol[x]) return 'stop';
+      for (let y = Math.max(0, y0); y < Math.min(H, y1); y++) if (!ruleRow[y] && mask[y * W + x]) return true;
+      return false;
+    };
+    const rowInk = (y) => {
+      if (ruleRow[y]) return 'stop';
+      for (let x = Math.max(0, x0); x < Math.min(W, x1); x++) if (!ruleCol[x] && mask[y * W + x]) return true;
+      return false;
+    };
+    // Move an edge outwards while ink continues; stop at a rule or at a gap of `gap` pixels.
+    const grow = (start, step, end, hasInk, gap) => {
+      let last = start, run = 0;
+      for (let k = start; k !== end; k += step) {
+        const h = hasInk(k);
+        if (h === 'stop') break;
+        if (h) { last = k; run = 0; } else if (++run >= gap) break;
+      }
+      return last;
+    };
+    x1 = grow(x1, 1, Math.min(W, x1 + Math.round(px * 1.5)), colInk, Math.max(2, Math.round(px * 0.3))) + 1;
+    x0 = grow(x0, -1, Math.max(-1, x0 - Math.round(px * 0.5)), colInk, Math.max(2, Math.round(px * 0.3)));
+    y0 = grow(y0, -1, Math.max(-1, y0 - Math.round(px * 0.5)), rowInk, Math.max(2, Math.round(px * 0.12)));
+    y1 = grow(y1, 1, Math.min(H, y1 + Math.round(px * 0.4)), rowInk, Math.max(2, Math.round(px * 0.12))) + 1;
+    // The nearest table rules around the text: the patch must stay inside them.
+    let rT = -1, rB = H, rL = -1, rR = W;
+    for (let y = Math.min(H - 1, y0); y >= 0; y--) if (ruleRow[y]) { rT = y; break; }
+    for (let y = Math.max(0, y1); y < H; y++) if (ruleRow[y]) { rB = y; break; }
+    for (let x = Math.min(W - 1, x0); x >= 0; x--) if (ruleCol[x]) { rL = x; break; }
+    for (let x = Math.max(0, x1); x < W; x++) if (ruleCol[x]) { rR = x; break; }
+    // Back to the chunk's own directions.
+    const local = (bx0, by0, bx1, by1) => {
+      const pts = [[bx0, by0], [bx1, by0], [bx0, by1], [bx1, by1]].map(([x, y]) => rotateVec(...vp.convertToPdfPoint(x + left, y + top), -ch.rot));
+      return { u0: Math.min(...pts.map((p) => p[0])), u1: Math.max(...pts.map((p) => p[0])), v0: Math.min(...pts.map((p) => p[1])), v1: Math.max(...pts.map((p) => p[1])) };
+    };
+    const box = local(x0, y0, x1, y1);
+    // Stroke thickness relative to the letter size (bold letters have
+    // thicker strokes): the typical length of horizontal ink runs.
+    let runs = 0, inkPx = 0;
+    for (let y = Math.max(0, y0); y < Math.min(H, y1); y++) {
+      if (ruleRow[y]) continue;
+      for (let x = Math.max(0, x0), on = false; x < Math.min(W, x1); x++) {
+        const m = mask[y * W + x] && !ruleCol[x];
+        if (m) { inkPx++; if (!on) runs++; }
+        on = m;
+      }
+    }
+    box.stroke = runs ? inkPx / runs / px : 0;
+    const inner = local(rL + 1.5, rT + 1.5, rR - 0.5, rB - 0.5);
+    box.limits = {
+      u0: rL >= 0 ? inner.u0 : -Infinity, u1: rR < W ? inner.u1 : Infinity,
+      v0: rB < H ? inner.v0 : -Infinity, v1: rT >= 0 ? inner.v1 : Infinity,
+    };
+    return box;
+  }
+
   async function startTextEdit(pageId, x, y) {
     const page = pageById(pageId);
     if (page.src == null) return status('This page has no original text. Use Add text to write on it.', 4000);
     const ch = chunkAt(await pageChunksAsync(page), x, y);
     if (!ch) {
-      const scanned = !sources[page.src].textPages.has(page.srcPage);
-      return status(scanned
-        ? "This page has no editable text (it looks scanned: the text is a picture). Use Whiteout and Add text instead."
-        : 'Click directly on a word or line of text to edit it.', 5000);
+      if (needsOcr(page)) {
+        return status('This page is scanned (the text is a picture). Click Recognize text first; then you can edit its text.', 6000);
+      }
+      return status('Click directly on a word or line of text to edit it.', 5000);
     }
-    const size = Math.round(ch.size * 10) / 10;
+    let size = ch.ocr ? ocrSize(ch) : ch.size;
     const { bg, fg } = sampleColors(page, ch);
+    // On scans, cover the ink actually there (and size the text to it).
+    // (Searched with the width-based size: the height-based one can be too
+    // big on lines with Chinese, and would reach into the row above.)
+    const ink = ch.ocr ? inkBox(page, { ...ch, size }, bg, fg, await sharpRender(page)) : null;
+    let bold = false;
+    if (ink) {
+      const ems = textEms(ch.str);
+      if (ems > 0) size = Math.max(size * 0.85, Math.min(size * 1.25, (ink.u1 - Math.min(ink.u0, ch.u)) / ems));
+      // Bold: strokes clearly thicker than is usual on this page.
+      const usual = await usualStroke(page, bg, fg);
+      bold = usual > 0 && ink.stroke > usual * 1.25;
+    }
+    size = Math.round(size * 10) / 10;
     const pad = 0.6 + size * 0.04;
-    const [cx, cy] = rotateVec(ch.u - pad, ch.v - size * 0.3, ch.rot);
+    const box = ink
+      ? { u0: Math.min(ink.u0, ch.u) - pad, u1: Math.max(ink.u1, ch.end) + pad, v0: Math.min(ink.v0, ch.v - size * 0.3) - pad, v1: Math.max(ink.v1, ch.v + size) + pad }
+      : { u0: ch.u - pad, u1: ch.end + pad, v0: ch.v - size * 0.3, v1: ch.v + size };
+    if (ink) { // stay inside the table cell's lines
+      const L = ink.limits;
+      box.u0 = Math.max(box.u0, L.u0); box.u1 = Math.min(box.u1, L.u1);
+      box.v0 = Math.max(box.v0, L.v0); box.v1 = Math.min(box.v1, L.v1);
+    }
+    const [cx, cy] = rotateVec(box.u0, box.v0, ch.rot);
     // The text box is placed so its first baseline sits on the original one.
     const [tx, ty] = rotateVec(ch.u, ch.v - size * 0.25, ch.rot);
     const draft = {
-      type: 'replace', text: ch.str, font: await matchFont(page, ch), size, color: fg, rot: ch.rot,
+      type: 'replace', text: ch.str, font: ch.ocr ? fontKey('Helvetica', bold, false) : await matchFont(page, ch), size, color: fg, rot: ch.rot,
       x: tx, y: ty, w: 0, h: size * LINE_HEIGHT,
-      cover: { x: cx, y: cy, w: ch.end - ch.u + 2 * pad, h: size * 1.3, rot: ch.rot, fill: bg },
+      cover: { x: cx, y: cy, w: box.u1 - box.u0, h: box.v1 - box.v0, rot: ch.rot, fill: bg },
     };
     layoutText(draft, false);
     draft.orig = draft.text; // unchanged text means nothing to save
@@ -3808,23 +4038,40 @@ window.QPDF_WASM_BASE64 = 'AGFzbQEAAAABwQVWYAF/AX9gAX8AYAJ/fwBgAn9/AX9gA39/fwBgA
     return out.save();
   }
 
+  const mulMatrix = (m, n) => [m[0] * n[0] + m[2] * n[1], m[1] * n[0] + m[3] * n[1], m[0] * n[2] + m[2] * n[3],
+    m[1] * n[2] + m[3] * n[3], m[0] * n[4] + m[2] * n[5] + m[4], m[1] * n[4] + m[3] * n[5] + m[5]];
+  const applyMatrix = (m, x, y) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
+
+  // Maps the recognised-text layer (lw × lh units) onto the page: scale it to
+  // the page as shown, tilt it back by the straightening angle around the
+  // centre, then turn "as shown" into the page's own coordinates.
+  function ocrMatrix(page, layer, lw, lh) {
+    const [x0, y0, x1, y1] = page.view;
+    const W = x1 - x0, H = y1 - y0, R = layer.rotation;
+    const dw = R % 180 ? H : W, dh = R % 180 ? W : H; // size as shown
+    const toPage = { 0: [1, 0, 0, 1, x0, y0], 90: [0, 1, -1, 0, x0 + W, y0], 180: [-1, 0, 0, -1, x0 + W, y0 + H], 270: [0, -1, 1, 0, x0, y0 + H] }[R];
+    const a = (-(layer.tilt || 0) * Math.PI) / 180, c = Math.cos(a), s = Math.sin(a); // undo the straightening
+    const tiltBack = mulMatrix(mulMatrix([1, 0, 0, 1, dw / 2, dh / 2], [c, s, -s, c, 0, 0]), [1, 0, 0, 1, -dw / 2, -dh / 2]);
+    return mulMatrix(mulMatrix(toPage, tiltBack), [dw / lw, 0, 0, dh / lh, 0, 0]);
+  }
+
   // Place a recognised-text layer back onto the page. The layer was made for
   // the page as it was shown (rotated by layer.rotation) and straightened by
   // layer.tilt degrees, so: scale it to the page, tilt it back around the
   // centre, then turn it from "as shown" into the page's own coordinates.
   async function addTextLayer(out, p, page, layer) {
     const { pushGraphicsState, popGraphicsState, concatTransformationMatrix, drawObject } = PDFLib;
-    const emb = (await out.embedPdf(layer.pdf, [0]))[0];
-    const [x0, y0, x1, y1] = page.view;
-    const W = x1 - x0, H = y1 - y0, R = layer.rotation;
-    const dw = R % 180 ? H : W, dh = R % 180 ? W : H; // size as shown
-    const mul = (m, n) => [m[0] * n[0] + m[2] * n[1], m[1] * n[0] + m[3] * n[1], m[0] * n[2] + m[2] * n[3],
-      m[1] * n[2] + m[3] * n[3], m[0] * n[4] + m[2] * n[5] + m[4], m[1] * n[4] + m[3] * n[5] + m[5]];
-    const toPage = { 0: [1, 0, 0, 1, x0, y0], 90: [0, 1, -1, 0, x0 + W, y0], 180: [-1, 0, 0, -1, x0 + W, y0 + H], 270: [0, -1, 1, 0, x0, y0 + H] }[R];
-    const a = (-(layer.tilt || 0) * Math.PI) / 180, c = Math.cos(a), s = Math.sin(a); // undo the straightening
-    const tiltBack = mul(mul([1, 0, 0, 1, dw / 2, dh / 2], [c, s, -s, c, 0, 0]), [1, 0, 0, 1, -dw / 2, -dh / 2]);
-    const scale = [dw / emb.width, 0, 0, dh / emb.height, 0, 0];
-    const m = mul(mul(toPage, tiltBack), scale);
+    // Words hidden under a Whiteout box or replaced with Edit text are taken
+    // out of the layer, so searching the saved PDF doesn't find the old words.
+    const covers = page.annots.map((a) => (a.type === 'whiteout' ? a : a.cover)).filter(Boolean);
+    const pdf = covers.length
+      ? await PdfOcr.removeWords(layer.pdf, (x, y, lw, lh) => {
+        const [px, py] = applyMatrix(ocrMatrix(page, layer, lw, lh), x, y);
+        return covers.some((c) => inBox(c, px, py, 0));
+      })
+      : layer.pdf;
+    const emb = (await out.embedPdf(pdf, [0]))[0];
+    const m = ocrMatrix(page, layer, emb.width, emb.height);
     const name = p.node.newXObject('OcrText', emb.ref); // pdf-lib writes the layer into the file when saving
     p.pushOperators(pushGraphicsState(), concatTransformationMatrix(...m), drawObject(name), popGraphicsState());
   }

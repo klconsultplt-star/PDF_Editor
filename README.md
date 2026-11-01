@@ -71,6 +71,7 @@ Scanned PDFs are pictures of pages, so their text can't be searched, copied or c
 3. Wait a few seconds per page. Pages are straightened automatically if the scan is slightly crooked, and table lines are removed before reading so tables come out cleanly.
 
 Then:
+- **Edit text** works on the recognized page like on any other PDF: hover to see the words, click and retype. The patch is fitted to the actual ink on the scan (stopping at table lines), in the paper's colour; the new text matches the size, colour, tilt and boldness of the original. The replaced words are also removed from the hidden text, so searching the saved PDF finds the new words, not the old ones.
 - **Save / Download** gives a **searchable PDF**: it looks exactly like the scan, but you can search, select and copy the text in any PDF reader (Chinese searches work without spaces between words).
 - **Convert** turns the scan into Word, OpenDocument, Excel or CSV, with paragraphs, headings, lists and tables rebuilt from the recognized text. (Choosing Convert on a scan runs text recognition first.)
 
@@ -88,7 +89,7 @@ Keyboard shortcuts for tools: V select, E edit text, T add text, P draw, H highl
 - **Converting rebuilds the document** from where text and pictures sit on each page (a PDF doesn't store paragraphs or tables). Ordinary documents, reports, letters, invoices and tables convert well. Expect some tidying with: multi-column layouts (newspaper style), text in boxes beside each other, merged table cells, and charts or shapes drawn as lines (only pictures are carried over, not drawn shapes). Text running sideways is skipped.
 - Fonts are named as in the PDF; if a font isn't installed on your computer, Word or LibreOffice shows a similar one, so lines may wrap differently.
 - Word has one page colour per document: a PDF whose pages have *different* background colours gets shaded paragraphs instead (`.odt` keeps each page's colour).
-- **Text recognition** is very accurate on clear printed scans, less so on blurry phone photos, faint copies, decorative fonts or very small print. Handwriting isn't supported. It can't tell which font was used, so converted scans use Arial (or Microsoft YaHei for Chinese) at the recognized size; bold and italic aren't detected. Pictures inside a scanned page aren't carried into Word/Excel. **Edit text** doesn't work on recognized pages yet (use Whiteout and Add text).
+- **Text recognition** is very accurate on clear printed scans, less so on blurry phone photos, faint copies, decorative fonts or very small print. Handwriting isn't supported. It can't tell which font was used, so converted scans use Arial (or Microsoft YaHei for Chinese) at the recognized size; bold and italic aren't detected. Pictures inside a scanned page aren't carried into Word/Excel. On scans, edited text uses the standard sans font (the original font can't be identified), and large bold titles may come out regular.
 - A forgotten password can't be recovered: there is no way to open a locked PDF without it.
 - Typed signatures use handwriting fonts installed on your computer (Windows and Mac have several), and saved signatures stay in this browser only.
 

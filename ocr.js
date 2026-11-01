@@ -251,11 +251,44 @@
     return changed ? doc.save({ useObjectStreams: false }) : bytes;
   }
 
+  // Remove recognised words from a text layer: shouldRemove(x, y, w, h) gets
+  // each word's middle point in layer units (and the layer's size). Words
+  // are positioned from the start of their line, so emptying one doesn't
+  // move the others.
+  async function removeWords(bytes, shouldRemove) {
+    const { PDFDocument, PDFRawStream, decodePDFRawStream } = PDFLib;
+    const doc = await PDFDocument.load(bytes);
+    const { width: lw, height: lh } = doc.getPage(0).getSize();
+    let changed = false;
+    for (const [ref, obj] of doc.context.enumerateIndirectObjects()) {
+      if (!(obj instanceof PDFRawStream)) continue;
+      let text;
+      try { text = new TextDecoder('latin1').decode(decodePDFRawStream(obj).decode()); } catch { continue; }
+      if (!/\bTJ\b/.test(text)) continue;
+      let tm = [1, 0, 0, 1, 0, 0], ox = 0, oy = 0, size = 12, tz = 100;
+      const N = '([-\\d.]+)';
+      const re = new RegExp(`${N} ${N} ${N} ${N} ${N} ${N} Tm|${N} ${N} Td|/\\S+ ([\\d.]+) Tf|([\\d.]+) Tz|\\[ <([0-9A-Fa-f]*)> \\] TJ`, 'g');
+      const fixed = text.replace(re, (m, a, b, c, d, e, f, dx, dy, tf, z, hex) => {
+        if (a !== undefined) { tm = [a, b, c, d, e, f].map(Number); ox = tm[4]; oy = tm[5]; }
+        else if (dx !== undefined) { ox += tm[0] * dx + tm[2] * dy; oy += tm[1] * dx + tm[3] * dy; }
+        else if (tf !== undefined) size = Number(tf);
+        else if (z !== undefined) tz = Number(z);
+        else if (hex) {
+          const wx = ((hex.length / 4) * GLYPH_WIDTH * size * tz) / 100 / 2, wy = size * 0.35; // middle of the word
+          if (shouldRemove(ox + tm[0] * wx + tm[2] * wy, oy + tm[1] * wx + tm[3] * wy, lw, lh)) { changed = true; return '[ <> ] TJ'; }
+        }
+        return m;
+      });
+      if (fixed !== text) doc.context.assign(ref, doc.context.flateStream(Uint8Array.from(fixed, (ch) => ch.charCodeAt(0))));
+    }
+    return changed ? doc.save({ useObjectStreams: false }) : bytes;
+  }
+
   // Free the memory (about 100 MB with Chinese) once recognition is done.
   async function release() {
     if (worker) { await worker.terminate().catch(() => {}); worker = null; workerLangs = ''; }
   }
 
-  const api = { LANGUAGES, DPI, MAX_SIDE, recognize, release };
+  const api = { LANGUAGES, DPI, MAX_SIDE, recognize, release, removeWords };
   window.PdfOcr = api;
 })();
