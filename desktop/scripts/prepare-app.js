@@ -5,7 +5,7 @@ const path = require('node:path');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const OUT = path.resolve(__dirname, '..', 'app');
-const FILES = ['index.html', 'styles.css', 'app.js', 'convert.js', 'ocr.js', 'security.js', 'compress.js', 'redact.js', 'signature.js'];
+const FILES = ['index.html', 'styles.css', 'app.js', 'convert.js', 'ocr.js', 'security.js', 'compress.js', 'pdftext.js', 'signature.js'];
 
 fs.rmSync(OUT, { recursive: true, force: true });
 fs.mkdirSync(OUT, { recursive: true });

@@ -282,3 +282,33 @@ button.link { all: unset; color: var(--accent); cursor: pointer; text-decoration
 .results .note { color: var(--muted); font-weight: normal; }
 .dialog-buttons .btn { height: 36px; padding: 0 16px; font-weight: 400; }
 .dialog-buttons .btn.primary { font-weight: 600; }
+
+/* ---------- Paragraph editor (Edit text) ---------- */
+/* Look-alike fonts, used while typing and for letters a PDF's font lacks. */
+@font-face { font-family: 'PE Sans'; src: url('vendor/fonts/LiberationSans-Regular.ttf'); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: 'PE Sans'; src: url('vendor/fonts/LiberationSans-Bold.ttf'); font-weight: 700; font-style: normal; font-display: swap; }
+@font-face { font-family: 'PE Sans'; src: url('vendor/fonts/LiberationSans-Italic.ttf'); font-weight: 400; font-style: italic; font-display: swap; }
+@font-face { font-family: 'PE Sans'; src: url('vendor/fonts/LiberationSans-BoldItalic.ttf'); font-weight: 700; font-style: italic; font-display: swap; }
+@font-face { font-family: 'PE Serif'; src: url('vendor/fonts/LiberationSerif-Regular.ttf'); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: 'PE Serif'; src: url('vendor/fonts/LiberationSerif-Bold.ttf'); font-weight: 700; font-style: normal; font-display: swap; }
+@font-face { font-family: 'PE Serif'; src: url('vendor/fonts/LiberationSerif-Italic.ttf'); font-weight: 400; font-style: italic; font-display: swap; }
+@font-face { font-family: 'PE Serif'; src: url('vendor/fonts/LiberationSerif-BoldItalic.ttf'); font-weight: 700; font-style: italic; font-display: swap; }
+@font-face { font-family: 'PE Mono'; src: url('vendor/fonts/LiberationMono-Regular.ttf'); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: 'PE Mono'; src: url('vendor/fonts/LiberationMono-Bold.ttf'); font-weight: 700; font-style: normal; font-display: swap; }
+@font-face { font-family: 'PE Mono'; src: url('vendor/fonts/LiberationMono-Italic.ttf'); font-weight: 400; font-style: italic; font-display: swap; }
+@font-face { font-family: 'PE Mono'; src: url('vendor/fonts/LiberationMono-BoldItalic.ttf'); font-weight: 700; font-style: italic; font-display: swap; }
+@font-face { font-family: 'PE Calibri'; src: url('vendor/fonts/Carlito-Regular.ttf'); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: 'PE Calibri'; src: url('vendor/fonts/Carlito-Bold.ttf'); font-weight: 700; font-style: normal; font-display: swap; }
+@font-face { font-family: 'PE Calibri'; src: url('vendor/fonts/Carlito-Italic.ttf'); font-weight: 400; font-style: italic; font-display: swap; }
+@font-face { font-family: 'PE Calibri'; src: url('vendor/fonts/Carlito-BoldItalic.ttf'); font-weight: 700; font-style: italic; font-display: swap; }
+@font-face { font-family: 'PE Cambria'; src: url('vendor/fonts/Caladea-Regular.ttf'); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: 'PE Cambria'; src: url('vendor/fonts/Caladea-Bold.ttf'); font-weight: 700; font-style: normal; font-display: swap; }
+@font-face { font-family: 'PE Cambria'; src: url('vendor/fonts/Caladea-Italic.ttf'); font-weight: 400; font-style: italic; font-display: swap; }
+@font-face { font-family: 'PE Cambria'; src: url('vendor/fonts/Caladea-BoldItalic.ttf'); font-weight: 700; font-style: italic; font-display: swap; }
+@font-face { font-family: 'PE CJK'; src: url('vendor/fonts/NotoSansSC-Regular.ttf'); font-display: swap; unicode-range: U+2E80-9FFF, U+F900-FAFF, U+FF00-FFEF; }
+.para-editor {
+  position: absolute; z-index: 5; margin: 0; padding: 0; box-sizing: content-box;
+  outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 1px;
+  cursor: text; overflow-wrap: break-word; caret-color: #111;
+}
+.para-editor:focus { outline: 2px solid var(--accent); }

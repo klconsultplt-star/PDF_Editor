@@ -30,7 +30,7 @@ After changing the app's files, run `python3 build-single-file.py` to rebuild `d
 | Feature | How |
 | --- | --- |
 | Open a PDF | **Open**, or drag a PDF onto the window |
-| Edit existing text | **Edit text** tool (E): hover to see what can be edited, click a word or line, type the new text, click away to finish. The new text matches the original's font style (sans/serif/mono, bold, italic), size and colour, and the old words are deleted from the page itself (everything else on the line stays exactly where it was). Clear all the text to delete it. Select it and press Delete to undo the change |
+| Edit existing text | **Edit text** tool (E): hover to see the paragraphs, click one and edit it like in a word processor, click away to finish. See [Editing text](#editing-text). Select an edited paragraph and press Delete to bring the original back |
 | Add text | **Add text** tool, click where it should go, type. Click away to finish. Double-click existing added text to edit it |
 | Draw freehand | **Draw** tool |
 | Highlight an area | **Highlight** tool, drag over the area |
@@ -52,6 +52,21 @@ After changing the app's files, run `python3 build-single-file.py` to rebuild `d
 | Convert | **Convert** (or **Convert a PDF to Word, Excel or ODF** on the start screen): choose Word, OpenDocument Text, Excel, OpenDocument Spreadsheet or CSV, and all pages or some. See [Converting](#converting) |
 | Make smaller | **Compress** (or **Make PDF files smaller** on the start screen): choose High quality, Balanced or Smallest, then compress the open document or choose any number of PDF files. See [Compressing](#compressing-making-pdfs-smaller) |
 | Recognize text (OCR) | **Recognize text**: for scanned PDFs. Choose the languages and the text is recognized and added invisibly behind the scan. See [Recognizing text](#recognizing-text-ocr) |
+
+## Editing text
+
+Click any text with **Edit text** and its whole paragraph opens for editing, the way Acrobat does it:
+
+- **The text re-flows.** Type as much or as little as you like: the lines re-wrap inside the paragraph's width, keeping its alignment (left, centred, right or justified), line spacing and first-line indent. Bullet points, headings and table cells are edited on their own.
+- **The original fonts are used.** New text is written with the fonts inside the PDF, so it looks exactly like the rest of the document. Bold words, italics, colours and sizes inside the paragraph are kept: new letters take the style of the text around them.
+- **Missing letters.** PDFs usually contain only the letters they use. When you type a letter the PDF's font doesn't have, that word is written in a look-alike font instead: Liberation Sans/Serif/Mono (same measurements as Arial, Times New Roman and Courier New), Carlito (as Calibri), Caladea (as Cambria) or Noto Sans SC for Chinese. A message tells you when this happened.
+- **The old text is deleted** from the file, not covered up.
+- **Wider or narrower:** with **Select**, click the edited paragraph and drag its corner handle: the text re-flows to the new width. Drag the paragraph to move it.
+- If the paragraph gets longer than before it may run into the text below (other text isn't moved, as in Acrobat): you are told, and can shorten it or widen the box.
+
+What you see while typing is close to the result; once you click away the page is redrawn from the edited file, so it shows exactly what will be saved.
+
+On scanned pages (after **Recognize text**) and in PDFs whose fonts can't be read, Edit text works line by line as before: the old words are covered and the new ones written in the closest standard font.
 
 ## Converting
 
@@ -105,8 +120,9 @@ Keyboard shortcuts for tools: V select, E edit text, T add text, P draw, H highl
 ## Limitations
 
 - **Edit text** and **Whiteout** delete the original text from the saved file. They don't remove pictures: text that is part of a picture (a scan, a screenshot) is only covered, so for confidential information in a scanned page, crop or replace the picture instead. In rare PDFs whose fonts use unusual encodings, the old words can't be measured; they are then covered with a patch as before (still hidden, but not deleted).
-- Edited and added text use the 12 fonts built into every PDF reader (sans, serif and mono, each in regular, bold, italic and bold italic), matched to the closest original style. A document using an unusual font will look slightly different where edited. These fonts only cover Western European characters; other characters are saved as `?`.
-- Edit text works on PDFs that contain real text. Scanned pages are pictures of text: use Whiteout and Add text there.
+- Letters missing from a PDF's font are written in a look-alike font (see [Editing text](#editing-text)); a document using an unusual font will look slightly different there. The look-alike fonts are built into the desktop app and load from `vendor/fonts` when the editor is served from a website; the single-file version and a folder opened straight from disk use the standard PDF fonts instead (which cover Western European characters only).
+- Added text (**Add text**) uses the 12 standard PDF fonts (sans, serif and mono, each in regular, bold, italic and bold italic), which cover Western European characters only; other characters are saved as `?`.
+- Paragraphs are found from where the lines sit. Unusual layouts (text in boxes beside each other, web pages saved as PDF) may split or join paragraphs differently than you'd expect; editing still works, the box is just smaller or larger.
 - **Converting rebuilds the document** from where text and pictures sit on each page (a PDF doesn't store paragraphs or tables). Ordinary documents, reports, letters, invoices and tables convert well. Expect some tidying with: multi-column layouts (newspaper style), text in boxes beside each other, merged table cells, and charts or shapes drawn as lines (only pictures are carried over, not drawn shapes). Text running sideways is skipped.
 - Fonts are named as in the PDF; if a font isn't installed on your computer, Word or LibreOffice shows a similar one, so lines may wrap differently.
 - Word has one page colour per document: a PDF whose pages have *different* background colours gets shaded paragraphs instead (`.odt` keeps each page's colour).
@@ -123,7 +139,7 @@ Keyboard shortcuts for tools: V select, E edit text, T add text, P draw, H highl
 - [`ocr.js`](ocr.js): text recognition with [Tesseract](https://github.com/tesseract-ocr/tesseract) via [tesseract.js](https://github.com/naptha/tesseract.js) (Apache-2.0), running in WebAssembly. Before reading, each page is straightened, its paper whitened and long table lines erased; afterwards Chinese words are joined so searches match. The engine and the English, Malay and Chinese language data are in [`vendor/ocr`](vendor/ocr).
 - [`desktop/`](desktop): the desktop app (Electron).
 - [`compress.js`](compress.js): compression. It follows each page's drawing instructions to find how large every picture is shown, shrinks and re-saves pictures with the browser's own image tools, and repacks the file with qpdf.
-- [`redact.js`](redact.js): deletes original text for Edit text and Whiteout. It follows the page's drawing instructions to place every letter, using the widths from the PDF's fonts, and replaces the deleted letters with an equal gap.
+- [`pdftext.js`](pdftext.js): reads, deletes and writes the text in a page. It follows the page's drawing instructions to place every letter (using the widths and character maps of the PDF's fonts), finds lines and paragraphs, deletes letters (replacing them with an equal gap, so nothing else moves), and writes edited paragraphs with the PDF's own fonts. Look-alike fonts for missing letters are in [`vendor/fonts`](vendor/fonts) and are embedded with [fontkit](https://github.com/Hopding/fontkit) (MIT), only the letters used.
 - [`security.js`](security.js): opening locked PDFs and password-protecting downloads, using [qpdf](https://qpdf.sourceforge.io/) (Apache-2.0) compiled to WebAssembly. It's loaded only when first needed (`vendor/qpdf.js` and `vendor/qpdf-wasm.js`, about 1.8 MB).
 - [pdf.js](https://mozilla.github.io/pdf.js/) (Apache-2.0) draws the pages; [pdf-lib](https://pdf-lib.js.org/) (MIT) writes the edited PDF. Both are bundled in [`vendor/`](vendor) so the app works offline.
 - Edits are stored in PDF coordinates while you work and are written into the original pages when you download, so the original content (text, vector graphics, fonts) is kept as is.

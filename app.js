@@ -430,7 +430,7 @@
     if (page.src == null) return vp;
     if (canvas._task) canvas._task.cancel();
     try {
-      const p = await getPdfjsPage(sources[page.src], page.srcPage);
+      const p = hasParas(page) ? await previewPage(page) : await getPdfjsPage(sources[page.src], page.srcPage);
       const viewport = p.getViewport({ scale, rotation: page.rotation });
       const task = (canvas._task = p.render({ canvasContext: ctx, viewport }));
       await task.promise;
@@ -757,7 +757,8 @@
         return;
       } else if (tool === 'edittext') {
         const i = hitTest(page, x, y);
-        if (i >= 0 && isText(page.annots[i])) openTextEditor(pageId, i);
+        if (i >= 0 && page.annots[i].type === 'para') openParaEditor(pageId, i);
+        else if (i >= 0 && isText(page.annots[i])) openTextEditor(pageId, i);
         else startTextEdit(pageId, x, y);
         e.preventDefault();
         return;
@@ -814,7 +815,8 @@
         page.annots.push(d.preview);
       }
       drawOverlay(pageId);
-      if (d.saved || d.kind === 'pen' || d.kind === 'box') refreshThumb(pageId);
+      if (d.saved && page.annots[d.index] && page.annots[d.index].type === 'para') refreshPage(pageId);
+      else if (d.saved || d.kind === 'pen' || d.kind === 'box') refreshThumb(pageId);
     };
     canvas.addEventListener('pointerup', finish);
     canvas.addEventListener('pointercancel', finish);
@@ -827,7 +829,8 @@
       const page = pageById(pageId);
       const [x, y] = pdfPoint(e, pageId);
       const i = hitTest(page, x, y);
-      if (i >= 0 && isText(page.annots[i])) openTextEditor(pageId, i);
+      if (i >= 0 && page.annots[i].type === 'para') openParaEditor(pageId, i);
+      else if (i >= 0 && isText(page.annots[i])) openTextEditor(pageId, i);
     });
   }
 
@@ -856,6 +859,10 @@
     w = Math.max(w, 4);
     let h = Math.max(-negH, 4);
     if (a.type === 'image') h = (w * orig.h) / orig.w;
+    if (a.type === 'para') { // a wider or narrower paragraph: the text re-flows
+      a.width = Math.max(10, w - orig.dx); a.w = orig.dx + a.width; a.wrap = true;
+      return;
+    }
     if (isText(a)) {
       a.size = Math.max(4, Math.round(((orig.size * w) / orig.w) * 2) / 2);
       a.x = orig.x; a.y = orig.y; a.h = orig.h;
@@ -924,6 +931,7 @@
     const ed = editing;
     editing = null;
     ed.el.remove();
+    if (ed.kind === 'para') { closeParaEditor(ed, commit); return; }
     const page = pageById(ed.pageId);
     if (!page) return;
     const text = ed.el.value.replace(/\s+$/, '');
@@ -1061,6 +1069,20 @@
 
   function drawChunkOutline(ctx, ch) {
     const px = 1 / (zoom * DPR);
+    if (ch.areas) { // a paragraph: outline each of its lines
+      ctx.save();
+      ctx.fillStyle = 'rgba(37, 99, 235, 0.08)';
+      ctx.strokeStyle = '#2563eb';
+      ctx.lineWidth = 1.2 * DPR * px;
+      ctx.setLineDash([4 * DPR * px, 3 * DPR * px]);
+      for (const r of ch.areas) {
+        ctx.save(); ctx.translate(r.x, r.y); ctx.rotate(rad(r.rot || 0));
+        ctx.fillRect(0, 0, r.w, r.h); ctx.strokeRect(0, 0, r.w, r.h);
+        ctx.restore();
+      }
+      ctx.restore();
+      return;
+    }
     const b = chunkBox(ch, 1);
     ctx.save();
     ctx.rotate(rad(ch.rot));
@@ -1076,8 +1098,10 @@
   function updateTextHover(pageId, e) {
     const page = pageById(pageId);
     const [x, y] = pdfPoint(e, pageId);
-    const chunks = pageChunks(page);
-    const ch = chunks && hitTest(page, x, y) < 0 ? chunkAt(chunks, x, y) : null;
+    const paras = paragraphsNow(page);
+    const para = paras && hitTest(page, x, y) < 0 ? paragraphAt(paras, page, x, y) : null;
+    const chunks = para ? null : pageChunks(page);
+    const ch = para || (chunks && hitTest(page, x, y) < 0 ? chunkAt(chunks, x, y) : null);
     const prev = hoverChunk;
     if ((prev && prev.chunk) === ch) return;
     hoverChunk = ch ? { pageId, chunk: ch } : null;
@@ -1300,6 +1324,12 @@
   async function startTextEdit(pageId, x, y) {
     const page = pageById(pageId);
     if (page.src == null) return status('This page has no original text. Use Add text to write on it.', 4000);
+    // Real text: edit the whole paragraph in its own fonts.
+    const para = paragraphAt((await pageParagraphs(page)).paragraphs, page, x, y);
+    if (para) {
+      hoverChunk = null;
+      return openParaEditor(pageId, -1, newParaAnnot(page, para));
+    }
     const ch = chunkAt(await pageChunksAsync(page), x, y);
     if (!ch) {
       if (needsOcr(page)) {
@@ -1344,6 +1374,332 @@
     if (draft.text !== ch.str) status('Some characters here aren\'t in the built-in fonts and show as "?".', 5000);
     hoverChunk = null;
     openTextEditor(pageId, -1, 0, 0, draft);
+  }
+
+  // ---------- Editing paragraphs in the PDF's own fonts ----------
+  // Clicking text with Edit text opens its whole paragraph. The new text
+  // re-flows inside the paragraph's width and is written with the same
+  // fonts, sizes and colours as the original (PdfText does the reading and
+  // writing). Pages with edited paragraphs are shown from the edited file,
+  // so what you see is what gets saved.
+
+  // Look-alike fonts for letters a PDF's font doesn't contain.
+  const FALLBACK_FILES = {
+    sans: 'LiberationSans', serif: 'LiberationSerif', mono: 'LiberationMono', calibri: 'Carlito', cambria: 'Caladea',
+  };
+  const FALLBACK_CSS = {
+    sans: '"PE Sans", Arial, Helvetica', serif: '"PE Serif", "Times New Roman", Times', mono: '"PE Mono", "Courier New", Courier',
+    calibri: '"PE Calibri", Calibri, Carlito', cambria: '"PE Cambria", Cambria, Caladea',
+  };
+  const CJK_CSS = '"PE CJK", "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif';
+  function fallbackFamily(style) {
+    const n = style.baseFont || '';
+    if (/calibri|carlito/i.test(n)) return 'calibri';
+    if (/cambria|caladea/i.test(n)) return 'cambria';
+    if (style.mono) return 'mono';
+    if (style.serif) return 'serif';
+    return 'sans';
+  }
+  const variantOf = (style) => (style.bold && style.italic ? 'BoldItalic' : style.bold ? 'Bold' : style.italic ? 'Italic' : 'Regular');
+  const styleSize = (st) => Math.hypot(st.m[2], st.m[3]);
+  function cssColor(fill) {
+    const v = (fill && fill.v) || [];
+    const to = (x) => Math.max(0, Math.min(255, Math.round(x * 255)));
+    if (fill && fill.op === 'g') return `rgb(${to(v[0])},${to(v[0])},${to(v[0])})`;
+    if (fill && fill.op === 'rg') return `rgb(${to(v[0])},${to(v[1])},${to(v[2])})`;
+    if (fill && fill.op === 'k') return `rgb(${to((1 - v[0]) * (1 - v[3]))},${to((1 - v[1]) * (1 - v[3]))},${to((1 - v[2]) * (1 - v[3]))})`;
+    return '#000';
+  }
+
+  // Font files are loaded once, when first needed.
+  const fontFiles = new Map(); // file -> Promise<Uint8Array|null>
+  function fontFile(file) {
+    if (!fontFiles.has(file)) {
+      fontFiles.set(file, fetch('vendor/fonts/' + file)
+        .then((r) => (r.ok ? r.arrayBuffer() : null)).then((b) => (b ? new Uint8Array(b) : null))
+        .catch(() => null)); // e.g. opened straight from disk: the standard fonts are used instead
+    }
+    return fontFiles.get(file);
+  }
+
+  // Embeds the look-alike fonts a paragraph needs into `doc`, and returns the
+  // functions PdfText.writeParagraph uses to write letters in them.
+  async function fallbacksFor(doc, page, a, cache) {
+    const wanted = new Set();
+    PdfText.shape(doc, page, a, a.runs, (style, ch) => {
+      const key = fallbackFamily(style) + '-' + variantOf(style);
+      wanted.add(key);
+      if (ch.codePointAt(0) > 0x24f) wanted.add('cjk');
+      return { key, encode: () => ({ bytes: '\0', w: 0.5 }) };
+    });
+    for (const key of wanted) {
+      if (cache.has(key)) continue;
+      const file = key === 'cjk' ? 'NotoSansSC-Regular.ttf' : `${FALLBACK_FILES[key.split('-')[0]]}-${key.split('-')[1]}.ttf`;
+      const bytes = await fontFile(file);
+      let font = null;
+      if (bytes && window.fontkit) {
+        try {
+          if (!doc._peFontkit) { doc.registerFontkit(window.fontkit); doc._peFontkit = true; }
+          font = await doc.embedFont(bytes, { subset: true });
+        } catch (err) { console.warn('Could not use font', file, err); }
+      }
+      if (!font && key !== 'cjk') { // no font files (opened from disk): the closest standard font
+        const [fam, variant] = key.split('-');
+        const family = fam === 'mono' ? 'Courier' : fam === 'serif' || fam === 'cambria' ? 'Times' : 'Helvetica';
+        font = doc.embedStandardFont(StandardFonts[fontKey(family, /Bold/.test(variant), /Italic/.test(variant))]);
+      }
+      cache.set(key, font);
+    }
+    const has = (font, ch) => {
+      if (!font) return false;
+      const fk = font.embedder && font.embedder.font;
+      if (fk && fk.hasGlyphForCodePoint) return fk.hasGlyphForCodePoint(ch.codePointAt(0));
+      try { font.encodeText(ch); return true; } catch { return false; }
+    };
+    const encoder = (font) => (ch) => {
+      const hex = font.encodeText(ch).toString().slice(1, -1);
+      let bytes = '';
+      for (let i = 0; i < hex.length; i += 2) bytes += String.fromCharCode(parseInt(hex.substr(i, 2), 16));
+      return { bytes, w: font.widthOfTextAtSize(ch, 1) };
+    };
+    return {
+      pick(style, ch) {
+        const key = fallbackFamily(style) + '-' + variantOf(style);
+        for (const k of [key, 'cjk']) if (has(cache.get(k), ch)) return { key: k, encode: encoder(cache.get(k)) };
+        return null; // no font has this letter: it is left out
+      },
+      resource: (key) => cache.get(key).ref,
+    };
+  }
+
+  // Where an edited paragraph's first line starts (page coordinates).
+  const paraOrigin = (a) => fromLocal(a, a.dx, a.h - a.asc);
+
+  // Writes the page's edited paragraphs (called while building the PDF).
+  async function writeParagraphs(doc, p, page) {
+    const cache = new Map();
+    for (const a of page.annots) {
+      if (a.type !== 'para' || !a.runs.length) continue;
+      try {
+        const fb = await fallbacksFor(doc, p, a, cache);
+        const [x, y] = paraOrigin(a);
+        const res = PdfText.writeParagraph(doc, p, { ...a, x, y }, fb.pick, fb.resource);
+        a.laid = { lines: res.lines, width: res.width, fallback: res.usedFallback };
+      } catch (err) {
+        console.error('Could not write the edited paragraph', err);
+      }
+    }
+  }
+
+  // The box of an edited paragraph follows its laid-out text (top stays put).
+  function fitParaBox(a) {
+    if (!a.laid) return false;
+    const lines = Math.max(1, a.laid.lines);
+    const h = a.asc + (lines - 1) * a.lineGap + a.desc;
+    const w = a.wrap ? a.dx + a.width : Math.max(a.dx + a.laid.width, 8);
+    if (Math.abs(h - a.h) < 0.01 && Math.abs(w - a.w) < 0.01) return false;
+    const [tx, ty] = fromLocal(a, 0, a.h);
+    const [dx, dy] = rotateVec(0, -h, a.rot);
+    a.x = tx + dx; a.y = ty + dy; a.h = h; a.w = w;
+    return true;
+  }
+
+  // Pages with edited paragraphs are drawn from a preview of the edited page.
+  const previews = new Map(); // page id -> { key, page: Promise<pdf.js page>, doc }
+  const hasParas = (page) => page.annots.some((a) => a.type === 'para');
+  function previewPage(page) {
+    const key = JSON.stringify([page.srcPage, page.annots.filter((a) => a.type === 'para').map((a) => [a.runs, a.styles.length, a.x, a.y, a.rot, a.width, a.wrap, a.align])]);
+    const old = previews.get(page.id);
+    if (old && old.key === key) return old.page;
+    const entry = { key, doc: null };
+    entry.page = (async () => {
+      const bytes = await buildPdf({ list: [page], textOnly: true });
+      entry.doc = await pdfjsLib.getDocument({ data: bytes }).promise;
+      return entry.doc.getPage(1);
+    })();
+    previews.set(page.id, entry);
+    if (old) old.page.then(() => old.doc && old.doc.destroy()).catch(() => {});
+    return entry.page;
+  }
+
+  // Redraw a page (and its thumbnail) after its paragraphs changed.
+  async function refreshPage(pageId) {
+    const page = pageById(pageId);
+    const el = pageEl(pageId);
+    if (!page || !el) return;
+    const canvas = el.querySelector('canvas.base');
+    await paintPage(page, canvas, zoom * DPR);
+    el.dataset.rendered = zoom + ':' + page.rotation;
+    if (page.annots.some((a) => a.type === 'para' && fitParaBox(a))) { /* box follows the text */ }
+    drawOverlay(pageId);
+    refreshThumb(pageId);
+  }
+
+  // Paragraphs of an original page (cached).
+  const paraCache = new Map(); // "src:page" -> Promise<{ paragraphs }>
+  function pageParagraphs(page) {
+    if (page.src == null || ocrLayers.has(page.id)) return Promise.resolve({ paragraphs: [] });
+    const key = page.src + ':' + page.srcPage;
+    if (!paraCache.has(key)) {
+      paraCache.set(key, (async () => {
+        const src = sources[page.src];
+        if (!src.lib) src.lib = await PDFDocument.load(src.bytes, { ignoreEncryption: true });
+        return PdfText.paragraphs(src.lib, src.lib.getPage(page.srcPage));
+      })().catch((err) => { console.warn('Paragraphs not readable', err); return { paragraphs: [] }; }));
+    }
+    return paraCache.get(key);
+  }
+  const paraSync = new Map(); // same, once loaded (for hovering)
+  function paragraphsNow(page) {
+    if (page.src == null || ocrLayers.has(page.id)) return [];
+    const key = page.src + ':' + page.srcPage;
+    if (paraSync.has(key)) return paraSync.get(key);
+    pageParagraphs(page).then((r) => { paraSync.set(key, r.paragraphs); });
+    return null;
+  }
+  const paraKey = (d) => d.areas.map((r) => `${r.x.toFixed(1)},${r.y.toFixed(1)}`).join(';');
+  function paragraphAt(list, page, x, y) {
+    const edited = new Set(page.annots.filter((a) => a.type === 'para').map((a) => a.key));
+    for (const d of list) {
+      if (edited.has(paraKey(d))) continue;
+      if (d.areas.some((r) => inBox(r, x, y, 1))) return d;
+    }
+    return null;
+  }
+
+  // A new edited-paragraph item from a paragraph found on the page.
+  function newParaAnnot(page, d) {
+    const asc = d.size * 0.95, desc = d.size * 0.3;
+    const left = Math.min(d.u0, d.u0 + d.indent);
+    const dx = d.u0 - left;
+    const h = asc + (d.lines - 1) * d.lineGap + desc;
+    const [x, y] = rotateVec(left, d.vBottom - desc, d.rot);
+    const { bg } = sampleColors(page, { u: left, end: left + d.width + dx, v: d.vBottom, size: d.size, rot: d.rot });
+    return {
+      type: 'para', key: paraKey(d), x, y, w: dx + d.width, h, rot: d.rot, dx, asc, desc,
+      align: d.align, width: d.width, wrap: d.lines > 1, lineGap: d.lineGap, indent: d.indent, lines: d.lines,
+      styles: d.styles, runs: d.runs, origRuns: JSON.stringify(d.runs), areas: d.areas, bg,
+    };
+  }
+
+  // The paragraph editor: an editable box showing the text in look-alike
+  // fonts (with each run's size, colour, bold and italic) over the original.
+  function openParaEditor(pageId, index, draft) {
+    closeTextEditor();
+    const page = pageById(pageId);
+    const a = index >= 0 ? page.annots[index] : draft;
+    const vp = viewportFor(page, zoom);
+    const [bx, by] = fromLocal(a, 0, a.h);
+    const [sx, sy] = vp.convertToViewportPoint(bx, by);
+    const screenRot = ((page.rotation - (a.rot || 0)) % 360 + 360) % 360;
+    const size0 = styleSize(a.styles[a.runs.length ? a.runs[0].s : 0] || a.styles[0]);
+    const lineGap = a.lines > 1 || a.wrap ? a.lineGap : size0 * 1.2;
+    const div = document.createElement('div');
+    div.className = 'para-editor';
+    div.contentEditable = 'true';
+    div.spellcheck = true;
+    Object.assign(div.style, {
+      left: sx + 'px', transformOrigin: '0 0', transform: screenRot ? `rotate(${screenRot}deg)` : '',
+      lineHeight: lineGap * zoom + 'px', textAlign: a.align, background: a.bg || '#fff',
+      paddingLeft: a.dx * zoom + 'px', textIndent: (a.indent || 0) * zoom + 'px',
+      whiteSpace: a.wrap ? 'pre-wrap' : 'pre',
+    });
+    if (a.wrap) div.style.width = (a.dx + a.width) * zoom + 'px';
+    else div.style.minWidth = a.w * zoom + 'px';
+    // The first baseline sits on the original one: line box top + half the
+    // extra line spacing + the font's ascent (about 0.9 em).
+    div.style.top = sy + (a.asc - (lineGap - size0 * 1.15) / 2 - size0 * 0.92) * zoom + 'px';
+    const styleCss = (st) => {
+      const fam = fallbackFamily(st);
+      return `font-family:${FALLBACK_CSS[fam]}, ${CJK_CSS};font-size:${styleSize(st) * zoom}px;color:${cssColor(st.fill)};`
+        + `font-weight:${st.bold ? 700 : 400};font-style:${st.italic ? 'italic' : 'normal'}`;
+    };
+    for (const run of a.runs) {
+      const span = document.createElement('span');
+      span.dataset.s = run.s;
+      span.style.cssText = styleCss(a.styles[run.s]);
+      span.textContent = run.text;
+      div.appendChild(span);
+    }
+    div.dataset.s0 = a.runs.length ? a.runs[0].s : 0;
+    div.style.cssText += ';' + styleCss(a.styles[+div.dataset.s0]).replace(/color:[^;]*;/, '');
+    div.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Escape') { e.preventDefault(); closeTextEditor(false); return; }
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); closeTextEditor(); return; }
+      if (e.key === 'Enter') { e.preventDefault(); document.execCommand('insertText', false, '\n'); }
+    });
+    div.addEventListener('paste', (e) => { // plain text only
+      e.preventDefault();
+      document.execCommand('insertText', false, (e.clipboardData.getData('text/plain') || '').replace(/\r\n?/g, '\n'));
+    });
+    div.addEventListener('blur', () => closeTextEditor());
+    pageEl(pageId).appendChild(div);
+    editing = { kind: 'para', pageId, index, annot: a, el: div };
+    // Select all the text, ready to type over or edit.
+    const range = document.createRange();
+    range.selectNodeContents(div);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    div.focus();
+    setTimeout(() => { if (editing && editing.el === div) div.focus(); }, 0);
+    drawOverlay(pageId);
+  }
+
+  // Styled runs typed in the editor.
+  function readRuns(div) {
+    const runs = [];
+    const push = (text, s) => {
+      if (!text) return;
+      const last = runs[runs.length - 1];
+      if (last && last.s === s) last.text += text; else runs.push({ s, text });
+    };
+    const walk = (node, s) => {
+      for (const child of node.childNodes) {
+        if (child.nodeType === 3) push(child.data.replace(/ /g, ' '), s);
+        else if (child.nodeName === 'BR') push('\n', s);
+        else if (child.nodeType === 1) {
+          const cs = child.dataset && child.dataset.s != null ? +child.dataset.s : s;
+          if ((child.nodeName === 'DIV' || child.nodeName === 'P') && runs.length) push('\n', cs);
+          walk(child, cs);
+        }
+      }
+    };
+    walk(div, +div.dataset.s0 || 0);
+    // No trailing line breaks or spaces.
+    while (runs.length) {
+      const last = runs[runs.length - 1];
+      last.text = last.text.replace(/[\s\n]+$/, '');
+      if (last.text) break;
+      runs.pop();
+    }
+    return runs;
+  }
+
+  function closeParaEditor(ed, commit) {
+    const page = pageById(ed.pageId);
+    if (!page) return;
+    if (!commit) { drawOverlay(ed.pageId); return; }
+    const runs = readRuns(ed.el);
+    const a = ed.annot;
+    if (JSON.stringify(runs) === JSON.stringify(a.runs) && ed.index >= 0) { drawOverlay(ed.pageId); return; }
+    if (ed.index < 0 && JSON.stringify(runs) === a.origRuns) { drawOverlay(ed.pageId); return; }
+    checkpoint();
+    a.runs = runs;
+    // Until the preview is laid out, estimate the lines from the editor.
+    const shown = ed.el.getBoundingClientRect();
+    const est = Math.max(1, Math.round((ed.el.scrollHeight || shown.height) / (parseFloat(ed.el.style.lineHeight) || 1)));
+    a.laid = { lines: est, width: a.w - a.dx };
+    fitParaBox(a);
+    if (ed.index < 0) page.annots.push(a);
+    selection = null;
+    refreshPage(ed.pageId).then(() => {
+      const notes = [];
+      if (a.laid && a.laid.lines > a.lines) notes.push('The paragraph is now longer than before and may run into the text below: shorten it, or select it and drag its corner handle to make it wider.');
+      if (a.laid && a.laid.fallback) notes.push('Some letters aren\'t in the PDF\'s font, so a look-alike font was used for them.');
+      if (notes.length) status(notes.join(' '), 8000);
+    });
   }
 
   // ---------- Images ----------
@@ -1409,7 +1765,7 @@
     checkpoint();
     fn(a);
     drawOverlay(selection.pageId);
-    refreshThumb(selection.pageId);
+    if (a.type === 'para') refreshPage(selection.pageId); else refreshThumb(selection.pageId);
   }
 
   colorInput.addEventListener('change', () => applyProp((a) => { if (a.color) a.color = colorInput.value; }));
@@ -1463,11 +1819,11 @@
   function deleteSelection() {
     if (!selection) return;
     checkpoint();
-    pageById(selection.pageId).annots.splice(selection.index, 1);
+    const [removed] = pageById(selection.pageId).annots.splice(selection.index, 1);
     const id = selection.pageId;
     selection = null;
     drawOverlay(id);
-    refreshThumb(id);
+    if (removed && removed.type === 'para') refreshPage(id); else refreshThumb(id);
   }
 
   function nudgeSelection(dx, dy) {
@@ -1479,8 +1835,9 @@
 
   // ---------- Saving ----------
   // `list` picks which pages to include (default: all, in order).
-  async function buildPdf({ skipWatermarks = false, list = pages } = {}) {
-    closeTextEditor();
+  // textOnly: only the deleted and edited text (for previews of edited pages).
+  async function buildPdf({ skipWatermarks = false, list = pages, textOnly = false } = {}) {
+    if (!textOnly) closeTextEditor();
     const out = await PDFDocument.create();
     // Copy each source's pages in one go so shared fonts/images are copied once.
     const copied = new Map(); // "src:page" -> PDFPage
@@ -1515,18 +1872,27 @@
       // Text replaced with Edit text or under a Whiteout box is deleted from
       // the page itself, so it can't be found or copied in the saved file.
       const removal = new Map(); // edit -> { removed, unsure, invisible }
-      const targets = page.src == null ? [] : page.annots.filter((a) => (a.type === 'replace' && a.cover) || a.type === 'whiteout');
+      const targets = page.src == null ? [] : page.annots.filter((a) => (a.type === 'replace' && a.cover) || a.type === 'whiteout' || a.type === 'para');
       if (targets.length) {
         try {
-          const res = PdfRedact.removeText(out, p, targets.map((a) => {
-            const box = a.type === 'whiteout' ? a : a.cover;
-            return (x, y) => inBox(box, x, y, 0);
+          const res = PdfText.removeText(out, p, targets.map((a) => {
+            const boxes = a.type === 'para' ? a.areas : [a.type === 'whiteout' ? a : a.cover];
+            return (x, y) => boxes.some((box) => inBox(box, x, y, 0));
           }));
           targets.forEach((a, k) => removal.set(a, res[k]));
         } catch (err) {
           console.warn('Could not remove the original text', err);
         }
       }
+      if (hasParas(page)) {
+        await writeParagraphs(out, p, page);
+        // Whiteout always wins: edited text under a white box is deleted too.
+        const boxes = page.annots.filter((a) => a.type === 'whiteout');
+        if (boxes.length) {
+          try { PdfText.removeText(out, p, boxes.map((box) => (x, y) => inBox(box, x, y, 0))); } catch (err) { console.warn(err); }
+        }
+      }
+      if (textOnly) continue;
       const layer = ocrLayers.get(page.id);
       if (layer) await addTextLayer(out, p, page, layer);
 
