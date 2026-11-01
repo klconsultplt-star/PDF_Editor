@@ -6,6 +6,8 @@ A PDF editor and converter, as a **desktop app** for Windows, Mac and Linux or i
 
 **Convert PDF to Word, Excel and OpenDocument:** `.docx`, `.odt`, `.xlsx`, `.ods` and `.csv`, keeping fonts, bold/italic, sizes, colours, headings, paragraphs, lists, tables and pictures. See [Converting](#converting) below.
 
+**Make PDFs smaller:** compress the open document or many PDF files at once, with a choice of quality. See [Compressing](#compressing-making-pdfs-smaller).
+
 Also in this repository, to save any web page as a PDF exactly as it looks on screen (and open it in this editor):
 
 - **[Web to PDF browser extension](web-to-pdf-extension/README.md)** for Chrome and Edge: one click on the page you're viewing, works on logged-in pages, nothing to set up besides loading the extension. Download [`dist/web-to-pdf-extension.zip`](dist/web-to-pdf-extension.zip).
@@ -48,6 +50,7 @@ After changing the app's files, run `python3 build-single-file.py` to rebuild `d
 | Undo / redo | Buttons, or Ctrl+Z / Ctrl+Y |
 | Save | **Download** (or Ctrl+S) saves `<name>-edited.pdf` |
 | Convert | **Convert** (or **Convert a PDF to Word, Excel or ODF** on the start screen): choose Word, OpenDocument Text, Excel, OpenDocument Spreadsheet or CSV, and all pages or some. See [Converting](#converting) |
+| Make smaller | **Compress** (or **Make PDF files smaller** on the start screen): choose High quality, Balanced or Smallest, then compress the open document or choose any number of PDF files. See [Compressing](#compressing-making-pdfs-smaller) |
 | Recognize text (OCR) | **Recognize text**: for scanned PDFs. Choose the languages and the text is recognized and added invisibly behind the scan. See [Recognizing text](#recognizing-text-ocr) |
 
 ## Converting
@@ -61,6 +64,24 @@ After changing the app's files, run `python3 build-single-file.py` to rebuild `d
 | **CSV** `.csv` | Importing data elsewhere | The table data as plain text |
 
 Your edits are included: text you added or edited is converted; watermarks and text hidden under Whiteout or replaced with **Edit text** are left out.
+
+## Compressing (making PDFs smaller)
+
+Most of a PDF's size is pictures: photos, scans and screenshots, often stored with far more detail than a screen or printer can show. **Compress** shrinks each picture to the resolution it's actually shown at for the quality you pick, saves it again as JPEG (or with lossless compression when that's smaller, as for screenshots), removes leftovers such as page thumbnails, and packs the file with the strongest lossless compression. Text, fonts and drawings are not changed, so they stay sharp and searchable.
+
+| Quality | Pictures | Good for |
+| --- | --- | --- |
+| **High quality** | 300 dpi | Printing |
+| **Balanced** (default) | 150 dpi | Screens, email, uploading |
+| **Smallest** | 96 dpi | The smallest files; still readable on screen |
+
+- **This document** compresses the open PDF, including your edits (and its password, if you set one), and saves `<name>-compressed.pdf`.
+- **Choose PDF files…** compresses one or many files without opening them. A table shows each file's size before and after. In the browser several files download together as `compressed-pdfs.zip`; the desktop app asks for a folder and saves them there (it never overwrites a file: it adds `(2)` to the name instead).
+- The result is never larger than the original. A PDF that is mostly text is usually already compact and only gets 10–40% smaller.
+
+Measured on test files (Balanced): a 14.4 MB photo album → 253 KB, a scanned page 358 KB → 178 KB, a web page saved as PDF 14.7 MB → 3.4 MB, a text report 71 KB → 45 KB.
+
+Password-protected files have to be opened in the editor with their password first, then use **Compress**.
 
 ## Recognizing text (OCR)
 
@@ -90,6 +111,7 @@ Keyboard shortcuts for tools: V select, E edit text, T add text, P draw, H highl
 - Fonts are named as in the PDF; if a font isn't installed on your computer, Word or LibreOffice shows a similar one, so lines may wrap differently.
 - Word has one page colour per document: a PDF whose pages have *different* background colours gets shaded paragraphs instead (`.odt` keeps each page's colour).
 - **Text recognition** is very accurate on clear printed scans, less so on blurry phone photos, faint copies, decorative fonts or very small print. Handwriting isn't supported. It can't tell which font was used, so converted scans use Arial (or Microsoft YaHei for Chinese) at the recognized size; bold and italic aren't detected. Pictures inside a scanned page aren't carried into Word/Excel. On scans, edited text uses the standard sans font (the original font can't be identified), and large bold titles may come out regular.
+- **Compressing** leaves pictures in CMYK or special colour spaces, JBIG2/JPEG 2000 pictures and transparency masks as they are (only packed losslessly). Fonts are not reduced.
 - A forgotten password can't be recovered: there is no way to open a locked PDF without it.
 - Typed signatures use handwriting fonts installed on your computer (Windows and Mac have several), and saved signatures stay in this browser only.
 
@@ -100,6 +122,7 @@ Keyboard shortcuts for tools: V select, E edit text, T add text, P draw, H highl
 - [`signature.js`](signature.js): the signature dialog (draw, type, upload, saved signatures).
 - [`ocr.js`](ocr.js): text recognition with [Tesseract](https://github.com/tesseract-ocr/tesseract) via [tesseract.js](https://github.com/naptha/tesseract.js) (Apache-2.0), running in WebAssembly. Before reading, each page is straightened, its paper whitened and long table lines erased; afterwards Chinese words are joined so searches match. The engine and the English, Malay and Chinese language data are in [`vendor/ocr`](vendor/ocr).
 - [`desktop/`](desktop): the desktop app (Electron).
+- [`compress.js`](compress.js): compression. It follows each page's drawing instructions to find how large every picture is shown, shrinks and re-saves pictures with the browser's own image tools, and repacks the file with qpdf.
 - [`security.js`](security.js): opening locked PDFs and password-protecting downloads, using [qpdf](https://qpdf.sourceforge.io/) (Apache-2.0) compiled to WebAssembly. It's loaded only when first needed (`vendor/qpdf.js` and `vendor/qpdf-wasm.js`, about 1.8 MB).
 - [pdf.js](https://mozilla.github.io/pdf.js/) (Apache-2.0) draws the pages; [pdf-lib](https://pdf-lib.js.org/) (MIT) writes the edited PDF. Both are bundled in [`vendor/`](vendor) so the app works offline.
 - Edits are stored in PDF coordinates while you work and are written into the original pages when you download, so the original content (text, vector graphics, fonts) is kept as is.

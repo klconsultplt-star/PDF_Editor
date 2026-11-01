@@ -73,5 +73,5 @@
   const encrypt = (bytes, password) =>
     run(['/in.pdf', '--encrypt', '--user-password=' + password, '--owner-password=' + password, '--bits=256', '--', '/out.pdf'], bytes);
 
-  window.PdfSecurity = { decrypt, encrypt };
+  window.PdfSecurity = { decrypt, encrypt, run };
 })();

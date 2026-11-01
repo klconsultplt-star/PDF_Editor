@@ -271,3 +271,14 @@ button.link { all: unset; color: var(--accent); cursor: pointer; text-decoration
   .sidebar { display: none; }
   .viewer { padding: 12px; }
 }
+
+/* Compress results */
+.results-wrap { max-height: 50vh; overflow: auto; margin: 4px 0 12px; }
+.results { width: 100%; border-collapse: collapse; font-size: 13px; }
+.results th, .results td { padding: 5px 8px; border-bottom: 1px solid var(--border); text-align: right; white-space: nowrap; }
+.results th:first-child, .results td:first-child { text-align: left; white-space: normal; overflow-wrap: anywhere; width: 45%; }
+.results td.note { white-space: normal; text-align: left; }
+.results .saved { color: #1b7f3b; font-weight: 600; }
+.results .note { color: var(--muted); font-weight: normal; }
+.dialog-buttons .btn { height: 36px; padding: 0 16px; font-weight: 400; }
+.dialog-buttons .btn.primary { font-weight: 600; }

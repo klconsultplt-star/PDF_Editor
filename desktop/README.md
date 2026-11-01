@@ -21,6 +21,7 @@ To make it your default PDF program: right-click any PDF → **Open with → Cho
 - Open PDFs from Windows: double-click, **Open with**, or drag a file onto the app icon. Opening another PDF while the app is running opens it in the same window.
 - Real **Open** and **Save as** windows, remembering the last folder.
 - A menu bar (File, Edit, View, Help) with keyboard shortcuts: Ctrl+O open, Ctrl+S save, Ctrl+E convert, Ctrl+= / Ctrl+- zoom.
+- Compressing many PDFs at once saves them straight into a folder you choose.
 - A warning before closing with unsaved changes.
 - Text recognition works fully offline (the engine and English, Malay and Chinese language data are built in).
 

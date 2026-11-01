@@ -1785,12 +1785,12 @@
   }
 
   // A progress window; returns update(fraction, text). onStop is called by the Stop button.
-  function showProgress(title, onStop) {
+  function showProgress(title, onStop, stopping = 'Stopping after this page…') {
     $('progressTitle').textContent = title;
     $('progressBar').value = 0;
     $('progressText').textContent = '';
     $('progressStop').disabled = false;
-    $('progressStop').onclick = () => { $('progressStop').disabled = true; $('progressText').textContent = 'Stopping after this page…'; onStop(); };
+    $('progressStop').onclick = () => { $('progressStop').disabled = true; $('progressText').textContent = stopping; onStop(); };
     if (!$('progressDialog').open) $('progressDialog').showModal();
     return (fraction, text) => {
       $('progressBar').value = Math.max(0, Math.min(1, fraction));
@@ -1870,6 +1870,132 @@
       console.error(err);
       status('Could not split: ' + (err.message || err), 6000);
     }
+  }
+
+  // ---------- Compress (make smaller) ----------
+  const COMPRESS_KEY = 'pdfEditor.compressLevel';
+  const fmtSize = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1e3)) + ' KB');
+  const smaller = (before, after) => Math.max(0, Math.round((1 - after / before) * 100));
+
+  function openCompressDialog() {
+    closeTextEditor();
+    let level = 'balanced';
+    try { level = localStorage.getItem(COMPRESS_KEY) || level; } catch {}
+    const radio = $('compressDialog').querySelector(`input[name=compressLevel][value="${level}"]`);
+    if (radio) radio.checked = true;
+    // With no document open, only "Choose PDF files" makes sense.
+    $('compressDocBtn').hidden = !pages.length;
+    $('compressFilesBtn').classList.toggle('primary', !pages.length);
+    $('compressError').textContent = '';
+    $('compressDialog').showModal();
+  }
+
+  function compressLevel() {
+    const level = $('compressDialog').querySelector('input[name=compressLevel]:checked').value;
+    try { localStorage.setItem(COMPRESS_KEY, level); } catch {}
+    return level;
+  }
+
+  // The open document, with its edits.
+  async function compressDocument() {
+    if (!pages.length) return;
+    const preset = compressLevel();
+    $('compressDialog').close();
+    let stopped = false;
+    const progress = showProgress('Making the PDF smaller…', () => { stopped = true; }, 'Stopping…');
+    try {
+      progress(0, 'Preparing the document…');
+      const built = await buildPdf();
+      const r = await PdfCompress.compress(built, { preset, onProgress: (f, t) => progress(0.05 + f * 0.95, t[0].toUpperCase() + t.slice(1)), shouldStop: () => stopped });
+      const bytes = await protect(r.bytes);
+      closeProgress();
+      // Compare with the file that was opened, when there is one.
+      const before = sources.length === 1 && sources[0].bytes ? Math.max(sources[0].bytes.length, 1) : r.before;
+      const name = baseName() + '-compressed.pdf';
+      downloadBlob(new Blob([bytes], { type: 'application/pdf' }), name);
+      const pct = smaller(before, bytes.length);
+      status(pct >= 3
+        ? `${DONE} ${name}: ${fmtSize(before)} → ${fmtSize(bytes.length)} (${pct}% smaller)`
+        : `${DONE} ${name} (${fmtSize(bytes.length)}): this PDF was already compact, so it couldn't be made much smaller.`, 9000);
+    } catch (err) {
+      closeProgress();
+      if (err.code === 'stopped') { status('Compressing stopped.'); return; }
+      console.error(err);
+      status('Could not compress: ' + (err.message || err), 6000);
+    }
+  }
+
+  // One or more PDF files from the computer (they don't need to be open).
+  async function compressFiles(files) {
+    files = files.filter((f) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name));
+    if (!files.length) { $('compressError').textContent = 'Choose PDF files.'; return; }
+    const preset = compressLevel();
+    $('compressDialog').close();
+    const n = files.length;
+    let stopped = false;
+    const progress = showProgress(n === 1 ? 'Making the PDF smaller…' : `Making ${n} PDFs smaller…`, () => { stopped = true; }, n === 1 ? 'Stopping…' : 'Stopping after this file…');
+    const results = [];
+    const out = {};
+    for (let i = 0; i < n && !stopped; i++) {
+      const file = files[i];
+      const label = n === 1 ? file.name : `${file.name} (${i + 1} of ${n})`;
+      progress(i / n, label);
+      let bytes;
+      try {
+        bytes = new Uint8Array(await file.arrayBuffer());
+        const r = await PdfCompress.compress(bytes, { preset, onProgress: (f, t) => progress((i + f) / n, `${label}: ${t}`), shouldStop: () => stopped });
+        let name = file.name.replace(/\.pdf$/i, '') + '-compressed.pdf';
+        for (let k = 2; out[name]; k++) name = file.name.replace(/\.pdf$/i, '') + `-compressed (${k}).pdf`;
+        out[name] = r.bytes;
+        results.push({ name: file.name, before: bytes.length, after: r.after });
+      } catch (err) {
+        if (err.code === 'stopped') break;
+        console.warn('Could not compress', file.name, err);
+        results.push({
+          name: file.name, before: bytes ? bytes.length : file.size,
+          error: err.code === 'encrypted' ? 'Password protected: open it here with its password, then use Compress.' : "Couldn't read this file (it may be damaged).",
+        });
+      }
+    }
+    closeProgress();
+    const names = Object.keys(out);
+    if (!names.length) {
+      if (stopped) { status('Compressing stopped.'); return; }
+      showCompressResults(results, '');
+      return;
+    }
+    let where;
+    if (names.length === 1) {
+      downloadBlob(new Blob([out[names[0]]], { type: 'application/pdf' }), names[0]);
+      where = `${DONE} ${names[0]}.`;
+    } else if (window.desktop && window.desktop.saveFiles) {
+      // Desktop app: save them side by side in a folder of the user's choice.
+      const saved = await window.desktop.saveFiles(out);
+      where = saved ? `Saved ${saved.count} PDFs in ${saved.folder}.` : 'Not saved (no folder chosen).';
+    } else {
+      downloadBlob(PdfConvert.zip(out), 'compressed-pdfs.zip');
+      where = `${DONE} ${names.length} PDFs in compressed-pdfs.zip.`;
+    }
+    if (stopped) where += ` Stopped after ${results.length} of ${n} files.`;
+    showCompressResults(results, where);
+  }
+
+  function showCompressResults(results, where) {
+    const ok = results.filter((r) => !r.error);
+    const before = ok.reduce((s, r) => s + r.before, 0), after = ok.reduce((s, r) => s + r.after, 0);
+    const esc = (t) => t.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    let rows = '<tr><th>File</th><th>Before</th><th>After</th><th>Smaller by</th></tr>';
+    for (const r of results) {
+      rows += r.error
+        ? `<tr><td>${esc(r.name)}</td><td>${fmtSize(r.before)}</td><td colspan="2" class="note">${esc(r.error)}</td></tr>`
+        : `<tr><td>${esc(r.name)}</td><td>${fmtSize(r.before)}</td><td>${fmtSize(r.after)}</td><td class="saved">${smaller(r.before, r.after) >= 1 ? smaller(r.before, r.after) + '%' : '<span class="note">already compact</span>'}</td></tr>`;
+    }
+    if (ok.length > 1) rows += `<tr><th>Total</th><th>${fmtSize(before)}</th><th>${fmtSize(after)}</th><th class="saved">${smaller(before, after)}%</th></tr>`;
+    $('compressTable').innerHTML = rows;
+    $('compressSummary').textContent = ok.length
+      ? `${where} ${fmtSize(before)} → ${fmtSize(after)} (${smaller(before, after)}% smaller).`
+      : 'No files could be compressed.';
+    $('compressResults').showModal();
   }
 
   // ---------- Password for downloads ----------
@@ -1961,6 +2087,10 @@
   $('splitDialog').querySelector('form').addEventListener('submit', (e) => { e.preventDefault(); runSplit(); });
   $('splitRanges').addEventListener('focus', () => { $('splitDialog').querySelector('input[value=extract]').checked = true; });
   $('splitEvery').addEventListener('focus', () => { $('splitDialog').querySelector('input[value=every]').checked = true; });
+  $('compressBtn').addEventListener('click', openCompressDialog);
+  $('compressStartBtn').addEventListener('click', openCompressDialog);
+  $('compressDialog').querySelector('form').addEventListener('submit', (e) => { e.preventDefault(); compressDocument(); });
+  $('compressInput').addEventListener('change', (e) => { const files = [...e.target.files]; e.target.value = ''; compressFiles(files); });
   $('passwordBtn').addEventListener('click', openPasswordDialog);
   $('passwordDialog').querySelector('form').addEventListener('submit', (e) => { e.preventDefault(); setPasswordFromDialog(); });
   $('pwShow').addEventListener('change', (e) => { $('pwInput').type = $('pwConfirm').type = e.target.checked ? 'text' : 'password'; });
@@ -2082,6 +2212,7 @@
       convert: openConvertDialog,
       ocr: () => openOcrDialog(),
       split: openSplitDialog,
+      compress: openCompressDialog,
       password: openPasswordDialog,
       sign: startSignature,
       watermark: toggleWatermark,

@@ -27,6 +27,7 @@
       <button class="btn primary" id="saveBtn" disabled title="Download the edited PDF (Ctrl+S)">Download</button>
       <button class="btn" id="ocrBtn" disabled title="Recognize the text in scanned pages (OCR), so the PDF can be searched, copied and converted">Recognize text</button>
       <button class="btn primary" id="convertBtn" disabled title="Convert to Word, Excel or OpenDocument">Convert</button>
+      <button class="btn" id="compressBtn" title="Make this PDF, or several PDF files, smaller">Compress</button>
     </div>
 
     <div class="group tools" id="tools">
@@ -93,6 +94,7 @@
           Convert a PDF to Word, Excel or ODF
           <input type="file" id="openConvertInput" accept="application/pdf,.pdf" hidden>
         </label>
+        <button class="btn big" id="compressStartBtn">Make PDF files smaller</button>
         <button class="btn big" id="newBlankBtn">Start with a blank page</button>
       </div>
     </section>
@@ -163,6 +165,38 @@
     </form>
   </dialog>
 
+  <!-- Compress (make smaller) -->
+  <dialog id="compressDialog" class="convert-dialog">
+    <form method="dialog" novalidate>
+      <h2>Make PDFs smaller</h2>
+      <p class="muted">Pictures, photos and scans are shrunk to the quality you choose and the file is packed tightly. Text and drawings stay sharp.</p>
+      <div class="formats" role="radiogroup" aria-label="Quality">
+        <label class="format"><input type="radio" name="compressLevel" value="high">
+          <span><strong>High quality</strong><small>Pictures at 300 dpi: good for printing</small></span></label>
+        <label class="format"><input type="radio" name="compressLevel" value="balanced" checked>
+          <span><strong>Balanced</strong><small>Pictures at 150 dpi: good for screens and email</small></span></label>
+        <label class="format"><input type="radio" name="compressLevel" value="small">
+          <span><strong>Smallest</strong><small>Pictures at 96 dpi: smallest files, still readable</small></span></label>
+      </div>
+      <p class="error" id="compressError" aria-live="polite"></p>
+      <div class="dialog-buttons">
+        <button type="button" data-close>Cancel</button>
+        <span class="spacer"></span>
+        <label class="btn" id="compressFilesBtn" title="Choose one or more PDF files to make smaller">Choose PDF files…
+          <input type="file" id="compressInput" accept="application/pdf,.pdf" multiple hidden></label>
+        <button type="submit" class="primary" id="compressDocBtn">Compress this document</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Compress results -->
+  <dialog id="compressResults" class="convert-dialog">
+    <h2>Compressed</h2>
+    <p class="muted" id="compressSummary"></p>
+    <div class="results-wrap"><table class="results" id="compressTable"></table></div>
+    <div class="dialog-buttons"><button type="button" class="primary" data-close>Close</button></div>
+  </dialog>
+
   <!-- Progress for long jobs -->
   <dialog id="progressDialog">
     <h2 id="progressTitle">Working…</h2>
@@ -210,6 +244,7 @@
   <script src="convert.js"></script>
   <script src="ocr.js"></script>
   <script src="security.js"></script>
+  <script src="compress.js"></script>
   <script src="signature.js"></script>
   <script src="app.js"></script>
 </body>

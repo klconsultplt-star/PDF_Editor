@@ -9,5 +9,7 @@ contextBridge.exposeInMainWorld('desktop', {
   onMergeFiles: (cb) => ipcRenderer.on('merge-files', (_e, files) => cb(files)),
   onMenu: (cb) => ipcRenderer.on('menu', (_e, cmd) => cb(cmd)),
   onSaved: (cb) => ipcRenderer.on('saved', (_e, path) => cb(path)),
+  // Several files at once (compressed PDFs): the user picks a folder.
+  saveFiles: (files) => ipcRenderer.invoke('save-files', files),
   ready: () => ipcRenderer.send('renderer-ready'),
 });

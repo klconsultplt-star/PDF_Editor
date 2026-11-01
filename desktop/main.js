@@ -148,6 +148,7 @@ function buildMenu() {
         { label: 'Convert to Word, Excel or ODF…', accelerator: 'CmdOrCtrl+E', click: send('convert') },
         { label: 'Recognize text (OCR)…', click: send('ocr') },
         { label: 'Split or extract pages…', click: send('split') },
+        { label: 'Compress (make smaller)…', click: send('compress') },
         { label: 'Password…', click: send('password') },
         { type: 'separator' },
         isMac ? { role: 'close' } : { role: 'quit', label: 'Exit' },
@@ -193,6 +194,33 @@ function buildMenu() {
   ];
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
+
+// Save several files into one folder (batch compress). Existing files are
+// never overwritten: "name (2).pdf" is used instead.
+ipcMain.handle('save-files', async (_e, files) => {
+  let folder = process.env.PDF_EDITOR_SAVE_DIR;
+  if (!folder) {
+    const res = await dialog.showOpenDialog(win, {
+      title: 'Choose a folder for the PDFs',
+      buttonLabel: 'Save here',
+      defaultPath: lastFolder || app.getPath('documents'),
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    if (res.canceled || !res.filePaths.length) return null;
+    folder = res.filePaths[0];
+  }
+  let count = 0;
+  for (const [name, data] of Object.entries(files)) {
+    const safe = path.basename(name).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_') || 'file.pdf';
+    const ext = path.extname(safe), stem = safe.slice(0, safe.length - ext.length);
+    let target = path.join(folder, safe);
+    for (let k = 2; fs.existsSync(target); k++) target = path.join(folder, `${stem} (${k})${ext}`);
+    fs.writeFileSync(target, Buffer.from(data));
+    count++;
+  }
+  lastFolder = folder;
+  return { folder, count };
+});
 
 ipcMain.on('renderer-ready', () => {
   rendererReady = true;
