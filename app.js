@@ -1420,7 +1420,15 @@
     const page = pageById(pageId);
     if (page.src == null) return status('This page has no original text. Use Add text to write on it.', 4000);
     // Real text: edit the whole paragraph in its own fonts.
-    const para = paragraphAt((await pageParagraphs(page)).paragraphs, page, x, y);
+    const found = await pageParagraphs(page);
+    const para = paragraphAt(found.paragraphs, page, x, y);
+    if (para && para.ocr) {
+      hoverChunk = null;
+      status('Matching the font of the scan…', 4000);
+      const a = await ocrParaAnnot(page, para, found.words || []);
+      status(`Font: ${a.match.font}. Type your changes, then click outside the box.`, 5000);
+      return openParaEditor(pageId, -1, a);
+    }
     if (para) {
       hoverChunk = null;
       return openParaEditor(pageId, -1, newParaAnnot(page, para));
@@ -1576,8 +1584,15 @@
   async function writeParagraphs(doc, p, page) {
     const cache = new Map();
     for (const a of page.annots) {
-      if (a.type !== 'para' || !a.runs.length) continue;
+      if (a.type !== 'para') continue;
+      if (!a.runs.length) { // all text deleted: only the patches
+        for (const r of a.patches || []) p.drawRectangle({ x: r.x, y: r.y, width: r.w, height: r.h, rotate: degrees(r.rot || 0), color: rgb(...hexToRgb(r.fill)) });
+        continue;
+      }
       try {
+        for (const r of a.patches || []) { // scans: paint over the original ink
+          p.drawRectangle({ x: r.x, y: r.y, width: r.w, height: r.h, rotate: degrees(r.rot || 0), color: rgb(...hexToRgb(r.fill)) });
+        }
         const fb = await fallbacksFor(doc, p, a, cache);
         const [x, y] = paraOrigin(a);
         const res = PdfText.writeParagraph(doc, p, { ...a, x, y }, fb.pick, fb.resource);
@@ -1632,9 +1647,13 @@
 
   // Paragraphs of an original page (cached).
   const paraCache = new Map(); // "src:page" -> Promise<{ paragraphs }>
+  const paraKeyOf = (page) => (ocrLayers.has(page.id) ? 'ocr:' + page.id : page.src + ':' + page.srcPage);
   function pageParagraphs(page) {
-    if (page.src == null || ocrLayers.has(page.id)) return Promise.resolve({ paragraphs: [] });
-    const key = page.src + ':' + page.srcPage;
+    if (page.src == null) return Promise.resolve({ paragraphs: [] });
+    const key = paraKeyOf(page);
+    if (ocrLayers.has(page.id) && !paraCache.has(key)) {
+      paraCache.set(key, ocrTextOf(page).catch((err) => { console.warn('Recognised text not readable', err); return { paragraphs: [], words: [] }; }));
+    }
     if (!paraCache.has(key)) {
       paraCache.set(key, (async () => {
         const src = sources[page.src];
@@ -1646,8 +1665,8 @@
   }
   const paraSync = new Map(); // same, once loaded (for hovering)
   function paragraphsNow(page) {
-    if (page.src == null || ocrLayers.has(page.id)) return [];
-    const key = page.src + ':' + page.srcPage;
+    if (page.src == null) return [];
+    const key = paraKeyOf(page);
     if (paraSync.has(key)) return paraSync.get(key);
     pageParagraphs(page).then((r) => { paraSync.set(key, r.paragraphs); });
     return null;
@@ -1660,6 +1679,399 @@
       if (d.areas.some((r) => inBox(r, x, y, 1))) return d;
     }
     return null;
+  }
+
+  // ---------- Scanned pages: paragraphs in look-alike fonts ----------
+  // After Recognize text, the recognised words are grouped into paragraphs
+  // like real text. Editing one paints over its ink in the paper's colour and
+  // writes the new text in the bundled font that looks most like the scan
+  // (found by drawing the words in each font and comparing with the ink).
+
+  // The recognised-text layer -> paragraphs and words in page coordinates.
+  async function ocrTextOf(page) {
+    const layer = ocrLayers.get(page.id);
+    const doc = await PDFDocument.load(layer.pdf);
+    const lp = doc.getPage(0);
+    const { width: lw, height: lh } = lp.getSize();
+    const M = ocrMatrix(page, layer, lw, lh);
+    const k = Math.hypot(M[0], M[1]);
+    const theta = (Math.atan2(M[1], M[0]) * 180) / Math.PI;
+    // A similarity transform: lengths scale by k, directions turn by theta.
+    const frame = (rot) => {
+      const r = rot + theta;
+      const [a, b] = rotateVec(M[4], M[5], -r);
+      return { r, u: (u) => k * u + a, v: (v) => k * v + b };
+    };
+    const mapRect = (r) => {
+      const [x, y] = applyMatrix(M, r.x, r.y);
+      return { x, y, w: r.w * k, h: r.h * k, rot: (r.rot || 0) + theta };
+    };
+    const paras = PdfText.paragraphs(doc, lp, { invisible: true, ocr: true }).paragraphs.map((d) => {
+      const f = frame(d.rot);
+      return {
+        ...d, ocr: true, rot: f.r,
+        u0: f.u(d.u0), left: f.u(d.left), right: f.u(d.right), v: f.v(d.v), vBottom: f.v(d.vBottom),
+        width: d.width * k, lineGap: d.lineGap * k, indent: d.indent * k, size: d.size * k,
+        areas: d.areas.map(mapRect),
+        lineBoxes: d.lineBoxes.map((l) => ({ u0: f.u(l.u0), u1: f.u(l.u1), v: f.v(l.v), size: l.size * k })),
+      };
+    });
+    // Words (for matching the font): letters split at gaps.
+    const words = [];
+    const { letters } = PdfText.letters(doc, lp, { invisible: true });
+    let cur = null;
+    for (const g of letters) {
+      const f = frame(g.rot);
+      const u = f.u(g.u), v = f.v(g.v), size = g.size * k, adv = g.adv * k;
+      const gap = cur ? u - cur.u1 : 0;
+      if (!cur || g.space || !g.str.trim() || Math.abs(v - cur.v) > size * 0.3 || gap > size * 0.15 || gap < -size * 0.5) {
+        cur = null;
+        if (!g.str.trim()) continue;
+        cur = { str: '', u0: u, u1: u, v, size, rot: f.r };
+        words.push(cur);
+      }
+      cur.str += g.str;
+      cur.u1 = Math.max(cur.u1, u + adv);
+    }
+    return { paragraphs: paras, words };
+  }
+
+  // Fonts the scan is compared with (loaded into the browser once).
+  const MATCH_FAMILIES = { sans: 'LiberationSans', serif: 'LiberationSerif', mono: 'LiberationMono', calibri: 'Carlito', cambria: 'Caladea' };
+  const MATCH_VARIANTS = ['Regular', 'Bold', 'Italic', 'BoldItalic'];
+  let matchFonts = null;
+  function loadMatchFonts() {
+    matchFonts ||= Promise.all(Object.entries(MATCH_FAMILIES).flatMap(([fam, file]) => MATCH_VARIANTS.map(async (variant) => {
+      const bytes = await fontFile(`${file}-${variant}.ttf`);
+      if (!bytes) return null;
+      try {
+        const face = new FontFace(`PEM-${fam}-${variant}`, bytes.slice());
+        await face.load();
+        document.fonts.add(face);
+        return { fam, variant, css: `"PEM-${fam}-${variant}"` };
+      } catch { return null; }
+    }))).then((list) => list.filter(Boolean));
+    return matchFonts;
+  }
+
+  const GRID_W = 64, GRID_H = 24;
+  // Average of a 0/1 mask over a grid laid on the box [x0, x1) × [y0, y1).
+  function toGrid(mask, W, x0, y0, x1, y1) {
+    const out = new Float32Array(GRID_W * GRID_H);
+    const cw = (x1 - x0) / GRID_W, chh = (y1 - y0) / GRID_H;
+    for (let gy = 0; gy < GRID_H; gy++) {
+      for (let gx = 0; gx < GRID_W; gx++) {
+        const sx0 = Math.floor(x0 + gx * cw), sx1 = Math.max(sx0 + 1, Math.floor(x0 + (gx + 1) * cw));
+        const sy0 = Math.floor(y0 + gy * chh), sy1 = Math.max(sy0 + 1, Math.floor(y0 + (gy + 1) * chh));
+        let n = 0, t = 0;
+        for (let y = sy0; y < sy1; y++) for (let x = sx0; x < sx1; x++) { t += mask[y * W + x]; n++; }
+        out[gy * GRID_W + gx] = n ? t / n : 0;
+      }
+    }
+    return out;
+  }
+  function inkBounds(mask, W, H) {
+    let x0 = W, y0 = H, x1 = -1, y1 = -1;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (mask[y * W + x] > 0.5) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+    return x1 < 0 ? null : { x0, y0, x1: x1 + 1, y1: y1 + 1 };
+  }
+  const correlation = (a, b) => {
+    let ma = 0, mb = 0;
+    for (let i = 0; i < a.length; i++) { ma += a[i]; mb += b[i]; }
+    ma /= a.length; mb /= b.length;
+    let sab = 0, saa = 0, sbb = 0;
+    for (let i = 0; i < a.length; i++) { const x = a[i] - ma, y = b[i] - mb; sab += x * y; saa += x * x; sbb += y * y; }
+    return saa && sbb ? sab / Math.sqrt(saa * sbb) : 0;
+  };
+
+  // A word of the scan, straightened, as an ink mask.
+  function scanWord(page, sharp, w, bg, fg) {
+    const s = sharp.scale;
+    const vp = viewportFor(page, s);
+    // A generous crop; the word's own edges are found from the ink below.
+    const pad = w.size * 0.6, vTop = w.v + w.size * 1.2, vBot = w.v - w.size * 0.5;
+    const W = Math.ceil((w.u1 - w.u0 + 2 * pad) * s), H = Math.ceil((vTop - vBot) * s);
+    if (W < 8 || H < 8 || W > 4000) return null;
+    const P = (i, j) => vp.convertToViewportPoint(...rotateVec(w.u0 - pad + i / s, vTop - j / s, w.rot));
+    const o = P(0, 0), ex = P(1, 0), ey = P(0, 1);
+    const B = [ex[0] - o[0], ex[1] - o[1], ey[0] - o[0], ey[1] - o[1], o[0], o[1]]; // crop -> sharp pixels
+    const det = B[0] * B[3] - B[1] * B[2];
+    const A = [B[3] / det, -B[1] / det, -B[2] / det, B[0] / det, 0, 0];
+    A[4] = -(A[0] * B[4] + A[2] * B[5]); A[5] = -(A[1] * B[4] + A[3] * B[5]);
+    const c = document.createElement('canvas');
+    c.width = W; c.height = H;
+    const g = c.getContext('2d', { willReadFrequently: true });
+    g.fillStyle = bg; g.fillRect(0, 0, W, H);
+    g.setTransform(...A);
+    g.drawImage(sharp.canvas, 0, 0);
+    const d = g.getImageData(0, 0, W, H).data;
+    const hexRgb = (h) => [1, 3, 5].map((k2) => parseInt(h.slice(k2, k2 + 2), 16));
+    const Bc = hexRgb(bg), F = hexRgb(fg);
+    // How much ink each pixel holds: 0 = paper, 1 = the text colour.
+    const span = Math.max(40, Math.hypot(F[0] - Bc[0], F[1] - Bc[1], F[2] - Bc[2]));
+    const mask = new Float32Array(W * H);
+    for (let j = 0, i = 0; j < mask.length; j++, i += 4) mask[j] = Math.min(1, Math.hypot(d[i] - Bc[0], d[i + 1] - Bc[1], d[i + 2] - Bc[2]) / span);
+    // Table lines and underlines aren't part of the letters.
+    for (let y = 0; y < H; y++) { let t = 0; for (let x = 0; x < W; x++) t += mask[y * W + x] > 0.5; if (t > W * 0.7) for (let x = 0; x < W; x++) mask[y * W + x] = 0; }
+    for (let x = 0; x < W; x++) { let t = 0; for (let y = 0; y < H; y++) t += mask[y * W + x] > 0.5; if (t > H * 0.85) for (let y = 0; y < H; y++) mask[y * W + x] = 0; }
+    // Grow from the recognised box until a clear gap: sideways up to the word
+    // gaps, up and down up to the gaps between lines.
+    const em = w.size * s;
+    const rowInk = (y, xa, xb) => { for (let x = xa; x < xb; x++) if (mask[y * W + x] > 0.5) return true; return false; };
+    const colInk = (x, ya, yb) => { for (let y = ya; y < yb; y++) if (mask[y * W + x] > 0.5) return true; return false; };
+    const grow = (from, step, end, has, gap) => { let last = from, run = 0; for (let k = from; k !== end; k += step) { if (has(k)) { last = k; run = 0; } else if (++run >= gap) break; } return last; };
+    const base = Math.round((vTop - w.v) * s); // baseline row
+    let ya = Math.round(base - em * 0.45), yb = Math.round(base + 1); // the x-height band
+    let xa = Math.round(pad * s), xb = Math.round(W - pad * s);
+    ya = grow(ya, -1, -1, (y) => rowInk(y, xa, xb), Math.max(2, Math.round(em * 0.1)));
+    yb = grow(yb, 1, H, (y) => rowInk(y, xa, xb), Math.max(2, Math.round(em * 0.1))) + 1;
+    xa = grow(xa + Math.round(em * 0.2), -1, -1, (x) => colInk(x, ya, yb), Math.max(2, Math.round(em * 0.14)));
+    xb = grow(xb - Math.round(em * 0.2), 1, W, (x) => colInk(x, ya, yb), Math.max(2, Math.round(em * 0.14))) + 1;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (y < ya || y >= yb || x < xa || x >= xb) mask[y * W + x] = 0;
+    const box = inkBounds(mask, W, H);
+    if (!box || box.x1 - box.x0 < 4 || box.y1 - box.y0 < 4) return null;
+    const grid = toGrid(mask, W, box.x0, box.y0, box.x1, box.y1);
+    // The word's ink colour: the average of its solid ink pixels.
+    const col = [0, 0, 0];
+    let nc = 0;
+    for (let j = 0, i = 0; j < mask.length; j++, i += 4) if (mask[j] > 0.8) { col[0] += d[i]; col[1] += d[i + 1]; col[2] += d[i + 2]; nc++; }
+    const color = nc ? col.map((c) => Math.round(c / nc)) : null;
+    // Stroke thickness: the typical length of horizontal ink runs (bold is thicker).
+    const runs = [];
+    for (let y = box.y0; y < box.y1; y++) {
+      let run = 0;
+      for (let x = box.x0; x <= box.x1; x++) {
+        if (x < box.x1 && mask[y * W + x] > 0.5) run++;
+        else if (run) { runs.push(run); run = 0; }
+      }
+    }
+    runs.sort((a, b) => a - b);
+    const stroke = runs.length ? runs[Math.floor(runs.length / 2)] / (w.size * s) : 0;
+    return { text: w.str, px: w.size * s, grid, color, stroke, density: grid.reduce((t, v) => t + v, 0) / grid.length, aspect: (box.x1 - box.x0) / (box.y1 - box.y0), inkW: (box.x1 - box.x0) / s, inkH: (box.y1 - box.y0) / s };
+  }
+
+  // The same word drawn in a candidate font, as an ink mask.
+  const renderCanvas = document.createElement('canvas');
+  function fontWord(text, css, px = 60) {
+    const S = Math.max(12, Math.min(120, Math.round(px))); // drawn at about the scan's size
+    const g = renderCanvas.getContext('2d', { willReadFrequently: true });
+    g.font = `${S}px ${css}`;
+    const m = g.measureText(text);
+    const W = Math.ceil(m.width + S), H = Math.ceil(S * 1.6);
+    renderCanvas.width = W; renderCanvas.height = H;
+    g.font = `${S}px ${css}`;
+    g.fillStyle = '#fff'; g.fillRect(0, 0, W, H);
+    g.fillStyle = '#000';
+    g.fillText(text, S * 0.5, S * 1.15);
+    const d = g.getImageData(0, 0, W, H).data;
+    const mask = new Float32Array(W * H);
+    for (let j = 0, i = 0; j < mask.length; j++, i += 4) mask[j] = (255 - d[i]) / 255;
+    const box = inkBounds(mask, W, H);
+    if (!box) return null;
+    const grid = toGrid(mask, W, box.x0, box.y0, box.x1, box.y1);
+    return { grid, density: grid.reduce((t, v) => t + v, 0) / grid.length, aspect: (box.x1 - box.x0) / (box.y1 - box.y0), inkWPerPx: (box.x1 - box.x0) / S };
+  }
+
+  // Best look-alike font for a scanned paragraph: { fam, bold, italic, size, score }.
+  // The letter shapes decide the font and italic. Bold is decided by the
+  // amount of ink compared with the rest of the page (scanning makes all
+  // text look heavier, so an absolute measure would call everything bold).
+  const isMatchWord = (w) => /[A-Za-z0-9]/.test(w.str) && !/[\u2e80-\u9fff]/.test(w.str);
+  function shapeScores(sw, fonts) {
+    return fonts.map((f) => {
+      const r = fontWord(sw.text, f.css, sw.px);
+      return r && { f, shape: correlation(sw.grid, r.grid) - 1.5 * Math.abs(Math.log(sw.aspect / r.aspect)), ratio: sw.density / Math.max(0.01, r.density), inkWPerPx: r.inkWPerPx };
+    }).filter(Boolean);
+  }
+  // The page's usual ink ratio (scan ÷ regular font) and most common font.
+  const pageInk = new Map();
+  async function pageInkInfo(page, words, sharp, bg, fg, fonts) {
+    const key = page.id + ':' + (ocrLayers.get(page.id) || {}).tilt;
+    if (pageInk.has(key)) return pageInk.get(key);
+    const sample = words.filter(isMatchWord).sort((a, b) => b.str.length - a.str.length).slice(0, 30)
+      .map((w) => scanWord(page, sharp, w, bg, fg)).filter(Boolean);
+    const ratios = [], diffs = [], votes = new Map();
+    for (const sw of sample) {
+      const all = shapeScores(sw, fonts);
+      const best = all.slice().sort((a, b) => b.shape - a.shape)[0];
+      if (!best) continue;
+      const italic = /Italic/.test(best.f.variant);
+      const reg = all.find((r) => r.f.fam === best.f.fam && /Italic/.test(r.f.variant) === italic && !/Bold/.test(r.f.variant));
+      const bold = all.find((r) => r.f.fam === best.f.fam && /Italic/.test(r.f.variant) === italic && /Bold/.test(r.f.variant));
+      if (!reg || !bold) continue;
+      ratios.push(reg.ratio);
+      diffs.push(bold.shape - reg.shape);
+      votes.set(best.f.fam, (votes.get(best.f.fam) || 0) + 1);
+    }
+    ratios.sort((a, b) => a - b);
+    diffs.sort((a, b) => a - b);
+    // The page's normal text: the middle of the sample (most words are regular).
+    const info = { ratio: ratios.length ? ratios[Math.floor(ratios.length / 2)] : 1, diff: diffs.length ? diffs[Math.floor(diffs.length / 2)] : 0, fam: [...votes.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || 'sans' };
+    pageInk.set(key, info);
+    return info;
+  }
+
+  async function matchScanFont(page, d, words, sharp, bg, fg, pageWords = words) {
+    const latin = words.filter(isMatchWord);
+    const cjk = [...d.text].filter(isCJKChar).length > d.text.replace(/\s/g, '').length / 3;
+    const fallbackSize = d.size;
+    if (cjk || !latin.length) {
+      // Chinese: the characters are about 1 em wide.
+      const sized = words.filter((w) => /[\u2e80-\u9fff]/.test(w.str)).map((w) => (w.u1 - w.u0) / Math.max(1, [...w.str].length));
+      const size = sized.length ? sized.sort((a, b) => a - b)[Math.floor(sized.length / 2)] : fallbackSize;
+      return { fam: 'sans', bold: false, italic: false, size, score: 0 };
+    }
+    const fonts = await loadMatchFonts();
+    if (!fonts.length) return { fam: 'sans', bold: false, italic: false, size: fallbackSize, score: 0 };
+    const usual = await pageInkInfo(page, pageWords, sharp, bg, fg, fonts);
+    // The longest words are the most telling.
+    const sample = latin.slice().sort((a, b) => b.str.length - a.str.length).slice(0, 10)
+      .map((w) => scanWord(page, sharp, w, bg, fg)).filter(Boolean);
+    if (!sample.length) return { fam: usual.fam, bold: false, italic: false, size: fallbackSize, score: 0 };
+    // Shape score per font (family + italic), over both weights.
+    const total = new Map(); // "fam|italic|bold" -> { shape, ratios, sizes }
+    for (const sw of sample) {
+      for (const r of shapeScores(sw, fonts)) {
+        const k = `${r.f.fam}|${/Italic/.test(r.f.variant)}|${/Bold/.test(r.f.variant)}`;
+        const e = total.get(k) || { shape: 0, ratios: [], sizes: [] };
+        e.shape += r.shape / sample.length;
+        e.ratios.push(r.ratio);
+        e.sizes.push(sw.inkW / r.inkWPerPx);
+        total.set(k, e);
+      }
+    }
+    const median = (a) => a.slice().sort((x, y) => x - y)[Math.floor(a.length / 2)];
+    let best = null;
+    for (const fam of Object.keys(MATCH_FAMILIES)) {
+      for (const italic of [false, true]) {
+        const reg = total.get(`${fam}|${italic}|false`), bold = total.get(`${fam}|${italic}|true`);
+        if (!reg || !bold) continue;
+        const shape = Math.max(reg.shape, bold.shape);
+        if (!best || shape > best.shape) best = { fam, italic, reg, bold, shape };
+      }
+    }
+    if (!best) return { fam: usual.fam, bold: false, italic: false, size: fallbackSize, score: 0 };
+    // Close calls go to the page's usual font, upright.
+    const shapeOf = (fam, italic) => Math.max(total.get(`${fam}|${italic}|false`)?.shape ?? -9, total.get(`${fam}|${italic}|true`)?.shape ?? -9);
+    const margin = sample.length < 3 ? 0.1 : 0.04;
+    if (best.italic && shapeOf(best.fam, false) > best.shape - margin) best = { ...best, italic: false, reg: total.get(`${best.fam}|false|false`), bold: total.get(`${best.fam}|false|true`), shape: shapeOf(best.fam, false) };
+    if (best.fam !== usual.fam && shapeOf(usual.fam, best.italic) > best.shape - margin) {
+      best = { ...best, fam: usual.fam, reg: total.get(`${usual.fam}|${best.italic}|false`), bold: total.get(`${usual.fam}|${best.italic}|true`), shape: shapeOf(usual.fam, best.italic) };
+    }
+    // Bold: clearly more ink than this page's usual text (in the same font).
+    // Bold: the bold letters fit clearly better; when it's close, more ink
+    // than the page's usual text decides.
+    // (Scanning thickens all ink, so this is compared with the page's normal text.)
+    const diff = best.bold.shape - best.reg.shape - usual.diff;
+    const ink = median(best.reg.ratios) / usual.ratio;
+    const isBold = diff > 0.15 || (diff > -0.05 && ink > 1.3);
+    const chosen = isBold ? best.bold : best.reg;
+    // Few or unclear letters (a number, a short word): the page's usual font.
+    const weak = best.shape < 0.2 && sample.length < 3;
+    return { fam: weak ? usual.fam : best.fam, bold: isBold, italic: weak ? false : best.italic, size: median(chosen.sizes), score: best.shape };
+  }
+
+  // Bold words and differently coloured words inside a scanned paragraph:
+  // returns { styles, runs } (or null to keep one style for the paragraph).
+  async function ocrWordRuns(page, d, words, sharp, bg, fg, match, base, pageWords) {
+    const tokens = d.text.split(/(\s+)/);
+    const wordTokens = tokens.filter((t, i) => i % 2 === 0 && t);
+    const ordered = words.slice().sort((a, b) => (Math.abs(a.v - b.v) > a.size * 0.5 ? b.v - a.v : a.u0 - b.u0));
+    if (ordered.length !== wordTokens.length || ordered.length < 2) return null;
+    const fonts = await loadMatchFonts();
+    const usual = await pageInkInfo(page, pageWords, sharp, bg, fg, fonts);
+    const pick = (bold) => fonts.find((f) => f.fam === match.fam && /Italic/.test(f.variant) === match.italic && /Bold/.test(f.variant) === bold);
+    const reg = pick(false), boldF = pick(true);
+    if (!reg || !boldF) return null;
+    const hex = (c) => '#' + c.map((v) => v.toString(16).padStart(2, '0')).join('');
+    const fgRgb = hexToRgb(fg).map((v) => v * 255);
+    const scans = ordered.map((w) => scanWord(page, sharp, w, bg, fg));
+    // The paragraph's usual stroke thickness; bold words are clearly thicker.
+    const strokes = scans.filter(Boolean).map((sw) => sw.stroke).sort((a, b) => a - b);
+    const usualStroke = strokes.length ? strokes[Math.floor(strokes.length / 2)] : 0;
+    const info = ordered.map((w, i) => {
+      const sw = scans[i];
+      if (!sw) return { bold: match.bold, color: null };
+      let bold = match.bold;
+      if (!match.bold && usualStroke && /[A-Za-z]{2,}|\d{2,}/.test(w.str)) {
+        const [r, b] = shapeScores(sw, [reg, boldF]);
+        bold = sw.stroke > usualStroke * 1.3 && !!r && !!b && (b.shape - r.shape - usual.diff > 0.1 || r.ratio > usual.ratio * 1.1);
+      }
+      const color = sw.color && Math.hypot(sw.color[0] - fgRgb[0], sw.color[1] - fgRgb[1], sw.color[2] - fgRgb[2]) > 45 ? sw.color : null;
+      return { bold, color };
+    });
+    // Colours of nearby shades are merged so a phrase gets one colour.
+    const palette = [];
+    const colorOf = (c) => {
+      if (!c) return fg;
+      const near = palette.find((p) => Math.hypot(p[0] - c[0], p[1] - c[1], p[2] - c[2]) < 40);
+      if (near) return hex(near);
+      palette.push(c);
+      return hex(c);
+    };
+    const styles = [], keys = new Map(), runs = [];
+    const styleFor = (bold, color) => {
+      const k = bold + color;
+      if (!keys.has(k)) {
+        keys.set(k, styles.length);
+        styles.push({ ...base, bold, fill: { op: 'rg', v: hexToRgb(color).map((v) => Math.round(v * 1000) / 1000) } });
+      }
+      return keys.get(k);
+    };
+    let wi = 0, cur = styleFor(match.bold, fg);
+    tokens.forEach((t, i) => {
+      if (!t) return;
+      if (i % 2 === 0) { const w = info[wi++]; cur = styleFor(w.bold, colorOf(w.color)); }
+      const last = runs[runs.length - 1];
+      if (last && last.s === cur) last.text += t; else runs.push({ s: cur, text: t });
+    });
+    return styles.length > 1 ? { styles, runs } : null;
+  }
+
+  // An edited-paragraph item for a scanned paragraph.
+  async function ocrParaAnnot(page, d, words) {
+    const sharp = await sharpRender(page);
+    const lb0 = d.lineBoxes[0];
+    const { bg, fg } = sampleColors(page, { u: lb0.u0, end: lb0.u1, v: lb0.v, size: lb0.size, rot: d.rot });
+    const inPara = words.filter((w) => d.areas.some((r) => inBox(r, ...rotateVec((w.u0 + w.u1) / 2, w.v + w.size * 0.3, w.rot), 0)));
+    const match = await matchScanFont(page, d, inPara, sharp, bg, fg, words);
+    const size = Math.round(match.size * 10) / 10;
+    // Patches over the scanned ink of each line (stopping at table lines).
+    const patches = d.lineBoxes.map((l) => {
+      const ch = { str: '', u: l.u0, end: l.u1, v: l.v, size: Math.min(l.size, size * 1.2), rot: d.rot };
+      const ink = inkBox(page, ch, bg, fg, sharp);
+      const pad = 0.6 + size * 0.04;
+      const box = ink
+        ? { u0: Math.min(ink.u0, ch.u) - pad, u1: Math.max(ink.u1, ch.end) + pad, v0: Math.min(ink.v0, ch.v - size * 0.3) - pad, v1: Math.max(ink.v1, ch.v + size) + pad }
+        : { u0: ch.u - pad, u1: ch.end + pad, v0: ch.v - size * 0.3, v1: ch.v + size };
+      if (ink) {
+        const L = ink.limits;
+        box.u0 = Math.max(box.u0, L.u0); box.u1 = Math.min(box.u1, L.u1);
+        box.v0 = Math.max(box.v0, L.v0); box.v1 = Math.min(box.v1, L.v1);
+      }
+      const [x, y] = rotateVec(box.u0, box.v0, d.rot);
+      return { x, y, w: box.u1 - box.u0, h: box.v1 - box.v0, rot: d.rot, fill: bg };
+    });
+    const rgbOf = (hex) => hexToRgb(hex).map((v) => Math.round(v * 1000) / 1000);
+    const r = (d.rot * Math.PI) / 180;
+    const style = {
+      font: null, baseFont: MATCH_FAMILIES[match.fam], bold: match.bold, italic: match.italic,
+      serif: match.fam === 'serif' || match.fam === 'cambria', mono: match.fam === 'mono',
+      m: [size * Math.cos(r), size * Math.sin(r), -size * Math.sin(r), size * Math.cos(r)],
+      fill: { op: 'rg', v: rgbOf(fg) }, tr: 0,
+    };
+    const a = newParaAnnot(page, { ...d, size });
+    a.styles = [style];
+    a.runs = [{ s: 0, text: d.text }];
+    const styled = await ocrWordRuns(page, d, inPara, sharp, bg, fg, match, style, words).catch(() => null);
+    if (styled) { a.styles = styled.styles; a.runs = styled.runs; }
+    a.origRuns = JSON.stringify(a.runs);
+    a.patches = patches;
+    a.areas = patches.map(({ fill, ...rect }) => rect);
+    a.bg = bg;
+    a.ocr = true;
+    a.match = { font: `${MATCH_FAMILIES[match.fam]} ${match.bold ? 'Bold' : ''}${match.italic ? ' Italic' : ''}`.trim(), score: Math.round(match.score * 100) / 100 };
+    return a;
   }
 
   // A new edited-paragraph item from a paragraph found on the page.
@@ -2056,7 +2468,7 @@
     const { pushGraphicsState, popGraphicsState, concatTransformationMatrix, drawObject } = PDFLib;
     // Words hidden under a Whiteout box or replaced with Edit text are taken
     // out of the layer, so searching the saved PDF doesn't find the old words.
-    const covers = page.annots.map((a) => (a.type === 'whiteout' ? a : a.cover)).filter(Boolean);
+    const covers = page.annots.flatMap((a) => (a.type === 'whiteout' ? [a] : a.type === 'para' ? a.areas : a.cover ? [a.cover] : []));
     const pdf = covers.length
       ? await PdfOcr.removeWords(layer.pdf, (x, y, lw, lh) => {
         const [px, py] = applyMatrix(ocrMatrix(page, layer, lw, lh), x, y);
@@ -2227,6 +2639,7 @@
           onProgress: (p) => progress((done + p) / todo.length, `${label}: ${Math.round(p * 100)}%`),
         });
         ocrLayers.set(page.id, { pdf: res.pdf, rotation: page.rotation, tilt: res.tilt, langs });
+        paraCache.delete('ocr:' + page.id); paraSync.delete('ocr:' + page.id);
         if (res.confidence < 60) lowConfidence++;
         done++;
       }
@@ -2242,9 +2655,10 @@
     updateButtons();
     const msg = stop
       ? `Stopped after ${done} of ${todo.length} pages. Click Recognize text to continue.`
-      : `Text recognized on ${done} page${done === 1 ? '' : 's'}. ${window.desktop ? 'Save' : 'Download'} it to get a searchable PDF, or Convert it to Word or Excel.` +
+      : `Text recognized on ${done} page${done === 1 ? '' : 's'}. ${window.desktop ? 'Save' : 'Download'} it to get a searchable PDF, Convert it to Word or Excel, or use Edit text to change its paragraphs.` +
         (lowConfidence ? ` ${lowConfidence} page${lowConfidence === 1 ? ' was' : 's were'} hard to read, so check the result.` : '');
     status(msg, 8000);
+    if (done) loadMatchFonts(); // ready for Edit text (matching the scan's font)
     const then = afterOcr;
     afterOcr = null;
     if (then && !stop && done) then();
@@ -2722,5 +3136,5 @@
   }
 
   // Exposed for automated tests.
-  window.pdfEditor = { buildPdf, exportAs, openFile, getState: () => ({ pages, zoom, tool, selection, savePassword, ocrPages: [...ocrLayers.keys()] }) };
+  window.pdfEditor = { buildPdf, exportAs, openFile, paragraphs: (i) => pageParagraphs(pages[i]), _match: { scanWord, fontWord, loadMatchFonts, matchScanFont: async (i, d, words) => { const sharp = await sharpRender(pages[i]); const lb = d.lineBoxes[0]; const { bg, fg } = sampleColors(pages[i], { u: lb.u0, end: lb.u1, v: lb.v, size: lb.size, rot: d.rot }); return matchScanFont(pages[i], d, words.filter((w) => d.areas.some((r) => inBox(r, ...rotateVec((w.u0 + w.u1) / 2, w.v + w.size * 0.3, w.rot), 0))), sharp, bg, fg, words); }, sharpRender: (i) => sharpRender(pages[i]), sampleColors: (i, ch) => sampleColors(pages[i], ch), page: (i) => pages[i], GRID_W, GRID_H }, getState: () => ({ pages, zoom, tool, selection, savePassword, ocrPages: [...ocrLayers.keys()] }) };
 })();

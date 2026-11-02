@@ -706,7 +706,8 @@
   // Every visible letter on the page:
   //   { u, v (position along / across the baseline), rot, size, adv, str,
   //     style: { font: [form names…, font name], m (letter matrix), fill, tr, … } }
-  function letters(doc, page) {
+  // { invisible: true } also reads hidden text (the recognised text of a scan).
+  function letters(doc, page, { invisible = false } = {}) {
     const ctx = doc.context;
     const out = [];
     const unmeasured = [];
@@ -716,7 +717,7 @@
       formCount: 0,
       glyph(g) {
         const { trm, gs } = g;
-        if (gs.tr === 3 || gs.tr === 7) return false; // invisible text
+        if ((gs.tr === 3 || gs.tr === 7) && !invisible) return false; // invisible text
         const rot = Math.round((Math.atan2(trm[1], trm[0]) * 180) / Math.PI * 10) / 10;
         const size = Math.hypot(trm[2], trm[3]);
         if (!size || g.font.vertical) return false;
@@ -745,12 +746,14 @@
 
   const styleKey = (s) => JSON.stringify([s.font, s.m, s.fill, s.tr, s.stroke]);
   const BULLET = /^([•◦▪▫‣⁃●○■□►▸–—\-\uf0a7\uf0b7\uf076\uf0d8\uf0fc\ufffd\ue000-\uf8ff]|\d{1,3}[.)]|[a-zA-Z][.)]|\(\w{1,3}\))(\s|$)/;
-  const isBulletText = (t) => /^([•◦▪▫‣⁃●○■□►▸–—\-\ufffd\ue000-\uf8ff]|\d{1,3}[.)]|[a-zA-Z][.)]|\(\w{1,3}\))$/.test(t);
+  // (also what text recognition often reads bullets as: * + · o e © «)
+  const isBulletText = (t) => /^([•◦▪▫‣⁃●○■□►▸–—\-\ufffd\ue000-\uf8ff*+·oe©«»°®]|\d{1,3}[.)]|[a-zA-Z][.)]|\(\w{1,3}\))$/.test(t);
 
   // Lines (pieces of text on one baseline, split at wide gaps such as table
   // columns), then paragraphs.
-  function paragraphs(doc, page) {
-    const { letters: all, unmeasured } = letters(doc, page);
+  // opts.ocr: recognised text (sizes are estimates, so styles are compared loosely).
+  function paragraphs(doc, page, opts = {}) {
+    const { letters: all, unmeasured } = letters(doc, page, opts);
     // 1. Lines.
     const groups = [];
     for (const g of all) {
@@ -839,14 +842,18 @@
         if (!next || used.has(next)) break;
         const d = last.v - next.v;
         const ratio = next.size / last.size;
-        if (ratio < 0.85 || ratio > 1.18) break;
+        if (opts.ocr ? ratio < 0.7 || ratio > 1.4 : ratio < 0.85 || ratio > 1.18) break;
         if (d < last.size * 0.95 || d > last.size * 2.1) break;
-        if (gap != null && Math.abs(d - gap) > last.size * 0.25) break;
-        if (BULLET.test(next.text)) break;
+        if (gap != null && Math.abs(d - gap) > last.size * (opts.ocr ? 0.35 : 0.25)) break;
+        if (BULLET.test(next.text) || (para.length === 1 && /^[*+·©«°®]\s/.test(next.text))) break;
+        // A line on its own followed by a row of a table (or columns): separate.
+        if (!Number.isFinite(last.rightLimit) && !last.hasLeft && Number.isFinite(next.rightLimit)) break;
+        // A short first line without closing punctuation over a long one: a heading.
+        if (para.length === 1 && last.u1 - last.u0 < (next.u1 - next.u0) * 0.5 && !/[.,;:!?。，；：]$/.test(last.text)) break;
         // Lines with nothing in common in their style (font, size, colour) are separate.
         const keysOf = (l) => new Set(l.items.filter((g) => g.str.trim()).map((g) => styleKey(g.style)));
         const lk = keysOf(last);
-        if (![...keysOf(next)].some((k) => lk.has(k))) break;
+        if (!opts.ocr && ![...keysOf(next)].some((k) => lk.has(k))) break;
         // Next to another column (a table): only a line that runs up to the
         // next column continues onto the line below (wrapped cell or column text).
         const limit = Number.isFinite(last.rightLimit) ? last.rightLimit : last.hasLeft ? pageRight[Math.round(last.rot)] : null;
@@ -969,6 +976,7 @@
     return dict instanceof PDFDict ? { ref, dict } : null;
   }
   function fontInfoAt(doc, page, path) {
+    if (!path) return null; // text that never had a font (recognised scans)
     const found = fontDictAt(doc, page, path);
     if (!found) return null;
     if (!fontCache.has(found.dict)) {

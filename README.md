@@ -66,7 +66,7 @@ Click any text with **Edit text** and its whole paragraph opens for editing, the
 
 What you see while typing is close to the result; once you click away the page is redrawn from the edited file, so it shows exactly what will be saved.
 
-On scanned pages (after **Recognize text**) and in PDFs whose fonts can't be read, Edit text works line by line as before: the old words are covered and the new ones written in the closest standard font.
+On scanned pages, run **Recognize text** first; then Edit text works on paragraphs too, in a look-alike of the scan's font (see [Recognizing text](#recognizing-text-ocr)). In PDFs whose fonts can't be read, Edit text works line by line: the old words are covered and the new ones written in the closest standard font.
 
 ## Converting
 
@@ -107,7 +107,7 @@ Scanned PDFs are pictures of pages, so their text can't be searched, copied or c
 3. Wait a few seconds per page. Pages are straightened automatically if the scan is slightly crooked, and table lines are removed before reading so tables come out cleanly.
 
 Then:
-- **Edit text** works on the recognized page like on any other PDF: hover to see the words, click and retype. The patch is fitted to the actual ink on the scan (stopping at table lines), in the paper's colour; the new text matches the size, colour, tilt and boldness of the original. The replaced words are also removed from the hidden text, so searching the saved PDF finds the new words, not the old ones.
+- **Edit text** works on recognized pages like on real text: hover to see the paragraphs, click one, edit it, and the lines re-flow. The app finds the closest look-alike font for the scan by drawing the recognized words in each of its fonts (Arial-, Times-, Courier-, Calibri- and Cambria-like, in regular, bold and italic) and comparing them with the ink; size, colour and the scan's slight tilt are matched too, and bold or coloured words inside a paragraph keep their look. The scanned ink of the paragraph is painted over in the paper's colour (stopping at table lines) and the new text is real text, so it is searchable and copyable. Recognition mistakes show up in the editor, so you can correct them at the same time.
 - **Save / Download** gives a **searchable PDF**: it looks exactly like the scan, but you can search, select and copy the text in any PDF reader (Chinese searches work without spaces between words).
 - **Convert** turns the scan into Word, OpenDocument, Excel or CSV, with paragraphs, headings, lists and tables rebuilt from the recognized text. (Choosing Convert on a scan runs text recognition first.)
 
@@ -126,7 +126,8 @@ Keyboard shortcuts for tools: V select, E edit text, T add text, P draw, H highl
 - **Converting rebuilds the document** from where text and pictures sit on each page (a PDF doesn't store paragraphs or tables). Ordinary documents, reports, letters, invoices and tables convert well. Expect some tidying with: multi-column layouts (newspaper style), text in boxes beside each other, merged table cells, and charts or shapes drawn as lines (only pictures are carried over, not drawn shapes). Text running sideways is skipped.
 - Fonts are named as in the PDF; if a font isn't installed on your computer, Word or LibreOffice shows a similar one, so lines may wrap differently.
 - Word has one page colour per document: a PDF whose pages have *different* background colours gets shaded paragraphs instead (`.odt` keeps each page's colour).
-- **Text recognition** is very accurate on clear printed scans, less so on blurry phone photos, faint copies, decorative fonts or very small print. Handwriting isn't supported. It can't tell which font was used, so converted scans use Arial (or Microsoft YaHei for Chinese) at the recognized size; bold and italic aren't detected. Pictures inside a scanned page aren't carried into Word/Excel. On scans, edited text uses the standard sans font (the original font can't be identified), and large bold titles may come out regular.
+- **Text recognition** is very accurate on clear printed scans, less so on blurry phone photos, faint copies, decorative fonts or very small print. Handwriting isn't supported. Converted scans use Arial (or Microsoft YaHei for Chinese) at the recognized size; bold and italic aren't detected there. Pictures inside a scanned page aren't carried into Word/Excel.
+- **Editing scanned text** uses the closest of the bundled fonts, not the scan's exact font (which may be one the app doesn't have). On test scans the font family, bold and italic were right for about 9 paragraphs in 10; single words (a table cell, a one-word heading) are the hardest to judge. Chinese is written in Noto Sans SC. The patch over the old ink is a flat paper colour, so on textured or stained paper it can show slightly.
 - **Compressing** leaves pictures in CMYK or special colour spaces, JBIG2/JPEG 2000 pictures and transparency masks as they are (only packed losslessly). Fonts are not reduced.
 - A forgotten password can't be recovered: there is no way to open a locked PDF without it.
 - Typed signatures use handwriting fonts installed on your computer (Windows and Mac have several), and saved signatures stay in this browser only.
