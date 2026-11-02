@@ -172,10 +172,22 @@
 
   function restore(json) {
     const s = JSON.parse(json);
+    const old = pages;
+    const same = s.pages.length === old.length && s.pages.every((p, i) => p.id === old[i].id && p.src === old[i].src
+      && p.srcPage === old[i].srcPage && p.rotation === old[i].rotation && String(p.view) === String(old[i].view));
     pages = s.pages;
     nextId = Math.max(nextId, s.nextId);
     selection = null;
-    renderAll();
+    if (!same) { renderAll(); return; }
+    // Same pages: redraw only the ones whose edits changed.
+    closeTextEditor(false);
+    const paras = (p) => JSON.stringify(p.annots.filter((a) => a.type === 'para').map((a) => [a.runs, a.x, a.y, a.width, a.wrap, a.rot]));
+    pages.forEach((p, i) => {
+      if (JSON.stringify(p.annots) === JSON.stringify(old[i].annots)) return;
+      if (paras(p) !== paras(old[i])) refreshPage(p.id);
+      else { drawOverlay(p.id); refreshThumb(p.id); }
+    });
+    updateButtons();
   }
 
   function undo() {
@@ -274,12 +286,21 @@
       const p = await getPdfjsPage(src, n);
       out.push({ id: uid(), src: index, srcPage: n, rotation: p.rotate % 360, view: p.view.slice(), annots: [] });
     }
-    // Note which pages contain real text; pages without any are scans (pictures of text).
-    await Promise.all(out.map(async (pg) => {
-      const tc = await (await getPdfjsPage(src, pg.srcPage)).getTextContent();
-      if (tc.items.some((it) => it.str && it.str.trim())) src.textPages.add(pg.srcPage);
-    }));
-    return { pages: out, password: unlocked.password };
+    // Note which pages contain real text; pages without any are scans
+    // (pictures of text). Done in the background, page by page, so the
+    // document shows straight away.
+    src.textChecked = false;
+    src.textReady = (async () => {
+      for (const pg of out) {
+        try {
+          const tc = await (await getPdfjsPage(src, pg.srcPage)).getTextContent();
+          if (tc.items.some((it) => it.str && it.str.trim())) src.textPages.add(pg.srcPage);
+        } catch { src.textPages.add(pg.srcPage); }
+      }
+      src.textChecked = true;
+      updateButtons();
+    })();
+    return { pages: out, password: unlocked.password, src };
   }
 
   function getPdfjsPage(src, n) {
@@ -303,6 +324,10 @@
       loaded.pages.forEach((p) => { p.src = 0; });
       images.clear();
       chunkCache.clear();
+      paraCache.clear();
+      paraSync.clear();
+      for (const pv of previews.values()) pv.page.then(() => pv.doc && pv.doc.destroy()).catch(() => {});
+      previews.clear();
       ocrLayers.clear();
       sharpPage = null;
       strokeCache.clear();
@@ -315,13 +340,17 @@
       zoom = fitZoom();
       renderAll();
       const n = `${pages.length} page${pages.length === 1 ? '' : 's'}`;
-      const scanned = pages.filter(isScanned).length;
-      const scanNote = HAS_OCR ? 'click Recognize text to make it searchable and convertible.' : 'its text is a picture, which PDF Editor Lite can\'t read (the full PDF Editor can).';
       status(loaded.password
         ? `Opened ${file.name} (${n}). It's password protected: the downloaded copy keeps the same password (change it with the Password button).`
-        : scanned
-          ? `Opened ${file.name} (${n}). ${scanned === pages.length ? 'It is scanned' : scanned + ' page' + (scanned === 1 ? ' is' : 's are') + ' scanned'}: ${scanNote}`
-          : `Opened ${file.name} (${n})`, loaded.password || scanned ? 7000 : 2500);
+        : `Opened ${file.name} (${n})`, loaded.password ? 7000 : 2500);
+      // Once the pages have been checked for text, mention scanned ones.
+      loaded.src.textReady.then(() => {
+        if (!sources.includes(loaded.src) || loaded.password) return;
+        const scanned = pages.filter(isScanned).length;
+        if (!scanned) return;
+        const scanNote = HAS_OCR ? 'click Recognize text to make it searchable and convertible.' : 'its text is a picture, which PDF Editor Lite can\'t read (the full PDF Editor can).';
+        status(`${file.name}: ${scanned === pages.length ? 'it is scanned' : scanned + ' page' + (scanned === 1 ? ' is' : 's are') + ' scanned'}: ${scanNote}`, 7000);
+      });
     } catch (err) {
       if (err instanceof Cancelled) return status('Opening cancelled');
       console.error(err);
@@ -370,12 +399,57 @@
   }
 
   // ---------- Rendering ----------
+  // Pages near the screen get their pictures; pages scrolled far away give
+  // the memory back (two full-size images per page add up quickly).
   const renderObserver = new IntersectionObserver((entries) => {
-    for (const e of entries) if (e.isIntersecting) renderBase(e.target);
-  }, { root: viewer, rootMargin: '600px 0px' });
+    for (const e of entries) {
+      if (e.isIntersecting) { sizeOverlay(e.target); renderBase(e.target); }
+      else releasePage(e.target);
+    }
+  }, { root: viewer, rootMargin: '1200px 0px' });
 
+  function sizeOverlay(el) {
+    const page = pageById(el.dataset.id);
+    if (!page) return;
+    const vp = viewportFor(page, zoom);
+    const ov = el.querySelector('canvas.overlay');
+    const w = Math.round(vp.width * DPR), h = Math.round(vp.height * DPR);
+    if (ov.width !== w || ov.height !== h) { ov.width = w; ov.height = h; }
+    drawOverlay(page.id);
+  }
+
+  function releasePage(el) {
+    const ov = el.querySelector('canvas.overlay');
+    if (ov.width) { ov.width = 0; ov.height = 0; }
+    if (el._drawing && el._drawing._task) el._drawing._task.cancel();
+    el._drawing = null;
+    const base = el.querySelector('canvas.base');
+    if (base && base.width) { base.width = 0; base.height = 0; }
+    el.dataset.rendered = '';
+  }
+
+  // Thumbnails are drawn one at a time, after the pages on screen, so they
+  // don't slow down showing the document.
+  const thumbQueue = new Set();
+  let thumbBusy = false;
+  async function drainThumbs() {
+    if (thumbBusy) return;
+    thumbBusy = true;
+    try {
+      while (thumbQueue.size) {
+        // Wait while pages on screen are still being drawn.
+        while ([...viewer.querySelectorAll('.page')].some((el) => el._drawing)) await new Promise((r) => setTimeout(r, 50));
+        const t = thumbQueue.values().next().value;
+        thumbQueue.delete(t);
+        if (t.isConnected) await renderThumb(t);
+      }
+    } finally { thumbBusy = false; }
+  }
   const thumbObserver = new IntersectionObserver((entries) => {
-    for (const e of entries) if (e.isIntersecting) renderThumb(e.target);
+    for (const e of entries) {
+      if (e.isIntersecting) thumbQueue.add(e.target); else thumbQueue.delete(e.target);
+    }
+    setTimeout(drainThumbs, 150);
   }, { root: sidebar, rootMargin: '400px 0px' });
 
   function renderAll() {
@@ -398,13 +472,11 @@
       base.className = 'base';
       const overlay = document.createElement('canvas');
       overlay.className = 'overlay';
-      overlay.width = Math.round(vp.width * DPR);
-      overlay.height = Math.round(vp.height * DPR);
+      overlay.width = 0; overlay.height = 0; // sized when the page comes near the screen
       el.append(base, overlay);
       attachPointer(overlay, page.id);
       viewer.appendChild(el);
       renderObserver.observe(el);
-      drawOverlay(page.id);
 
       sidebar.appendChild(makeThumb(page, i));
     });
@@ -412,14 +484,23 @@
     updateButtons();
   }
 
-  async function renderBase(el) {
+  // Draws a page into a new canvas and swaps it in when it's ready, so the
+  // old picture (stretched) stays visible meanwhile instead of a blank page.
+  async function renderBase(el, force = false) {
     const page = pageById(el.dataset.id);
     if (!page) return;
     const key = zoom + ':' + page.rotation;
-    if (el.dataset.rendered === key) return;
+    if (el.dataset.rendered === key && !force) return;
     el.dataset.rendered = key;
-    const canvas = el.querySelector('canvas.base');
-    await paintPage(page, canvas, zoom * DPR);
+    if (el._drawing && el._drawing._task) el._drawing._task.cancel();
+    const fresh = document.createElement('canvas');
+    fresh.className = 'base';
+    el._drawing = fresh;
+    const vp = await paintPage(page, fresh, zoom * DPR);
+    if (!vp || el._drawing !== fresh) return; // cancelled or superseded
+    el._drawing = null;
+    const old = el.querySelector('canvas.base');
+    if (old) old.replaceWith(fresh); else el.prepend(fresh);
   }
 
   // Draw the original page content (or blank white) onto a canvas.
@@ -450,6 +531,7 @@
     const el = pageEl(pageId);
     if (!page || !el) return;
     const canvas = el.querySelector('canvas.overlay');
+    if (!canvas.width) return; // off screen: drawn when it comes back
     const ctx = canvas.getContext('2d');
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -635,13 +717,14 @@
     page.annots.forEach((a) => drawAnnot(ctx, a));
   }
 
-  let thumbTimer;
+  const thumbTimers = new Map();
   function refreshThumb(pageId) {
-    clearTimeout(thumbTimer);
-    thumbTimer = setTimeout(() => {
+    clearTimeout(thumbTimers.get(pageId));
+    thumbTimers.set(pageId, setTimeout(() => {
+      thumbTimers.delete(pageId);
       const t = sidebar.querySelector(`.thumb[data-id="${pageId}"]`);
       if (t) renderThumb(t);
-    }, 300);
+    }, 300));
   }
 
   function pageAction(act, id) {
@@ -798,7 +881,16 @@
       } else if (drag.kind === 'pen') {
         const pts = drag.preview.points;
         const last = pts[pts.length - 1];
-        if (Math.hypot(x - last[0], y - last[1]) >= 1.5 / zoom) pts.push([x, y]);
+        if (Math.hypot(x - last[0], y - last[1]) < 1.5 / zoom) return;
+        pts.push([x, y]);
+        // Just add the new piece of line (redrawing everything each time is slow).
+        const ctx = canvas.getContext('2d');
+        ctx.save();
+        ctx.setTransform(...viewportFor(page, zoom * DPR).transform);
+        ctx.strokeStyle = drag.preview.color; ctx.lineWidth = drag.preview.lineWidth; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+        ctx.beginPath(); ctx.moveTo(last[0], last[1]); ctx.lineTo(x, y); ctx.stroke();
+        ctx.restore();
+        return;
       } else if (drag.kind === 'box') {
         drag.preview = boxFromDrag(tool, drag.start, [x, y], page.rotation);
       }
@@ -1532,9 +1624,7 @@
     const page = pageById(pageId);
     const el = pageEl(pageId);
     if (!page || !el) return;
-    const canvas = el.querySelector('canvas.base');
-    await paintPage(page, canvas, zoom * DPR);
-    el.dataset.rendered = zoom + ':' + page.rotation;
+    await renderBase(el, true);
     if (page.annots.some((a) => a.type === 'para' && fitParaBox(a))) { /* box follows the text */ }
     drawOverlay(pageId);
     refreshThumb(pageId);
@@ -2015,9 +2105,9 @@
   // text) and documents made only of blank pages have none.
   // A page needs OCR when it comes from a PDF but has no real text (a scan)
   // and hasn't been recognised yet.
-  const isScanned = (p) => p.src != null && !sources[p.src].textPages.has(p.srcPage) && !ocrLayers.has(p.id);
+  const isScanned = (p) => p.src != null && sources[p.src].textChecked && !sources[p.src].textPages.has(p.srcPage) && !ocrLayers.has(p.id);
+  const hasText = () => pages.some((p) => (p.src != null && (sources[p.src].textPages.has(p.srcPage) || !sources[p.src].textChecked)) || ocrLayers.has(p.id));
   const needsOcr = (p) => HAS_OCR && isScanned(p);
-  const hasText = () => pages.some((p) => (p.src != null && sources[p.src].textPages.has(p.srcPage)) || ocrLayers.has(p.id));
   const NO_TEXT = HAS_OCR
     ? 'Converting needs a PDF with text. This one has none: if it is scanned, click Recognize text first.'
     : 'Converting needs a PDF with text. This one has none (it may be scanned): PDF Editor Lite can\'t read scanned pages; the full PDF Editor can.';
@@ -2433,11 +2523,25 @@
     if (name !== 'select' && selection) { const id = selection.pageId; selection = null; drawOverlay(id); }
   }
 
+  // Resizes the pages in place: the visible ones are redrawn sharp, the rest
+  // when they scroll into view. Thumbnails don't change.
   function setZoom(z) {
+    closeTextEditor(true);
     const anchor = viewer.scrollTop / Math.max(1, viewer.scrollHeight);
     zoom = Math.max(0.25, Math.min(4, Math.round(z * 100) / 100));
-    renderAll();
+    for (const page of pages) {
+      const el = pageEl(page.id);
+      if (!el) continue;
+      const vp = viewportFor(page, zoom);
+      el.style.width = vp.width + 'px';
+      el.style.height = vp.height + 'px';
+      if (el.querySelector('canvas.overlay').width) sizeOverlay(el);
+    }
     viewer.scrollTop = anchor * viewer.scrollHeight;
+    // Observing again reports which pages are (nearly) visible now.
+    renderObserver.disconnect();
+    viewer.querySelectorAll('.page').forEach((el) => renderObserver.observe(el));
+    $('zoomLabel').textContent = Math.round(zoom * 100) + '%';
   }
 
   document.querySelectorAll('#tools .tool[data-tool]').forEach((b) => b.addEventListener('click', () => setTool(b.dataset.tool)));
