@@ -1,7 +1,7 @@
 {
   "name": "pdf-editor-desktop",
   "productName": "PDF Editor",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Edit, sign, convert and recognize text in PDF files, offline.",
   "author": "PDF Editor",
   "license": "MIT",
@@ -14,7 +14,7 @@
     "dist:mac": "npm run prepare-app && electron-builder --mac --x64 --arm64",
     "dist:linux": "npm run prepare-app && electron-builder --linux",
     "prepare-app:lite": "node scripts/prepare-app.js --lite",
-    "dist:win:lite": "npm run prepare-app:lite && electron-builder --win -c.productName=\"PDF Editor Lite\" -c.appId=com.pdfeditor.lite -c.extraMetadata.name=pdf-editor-lite -c.extraMetadata.productName=\"PDF Editor Lite\" -c.nsis.shortcutName=\"PDF Editor Lite\" -c.nsis.artifactName=\"PDF-Editor-Lite-Setup-\\${version}.exe\" -c.portable.artifactName=\"PDF-Editor-Lite-Portable-\\${version}.exe\"",
+    "dist:win:lite": "npm run prepare-app:lite && electron-builder --win -c.productName=\"PDF Editor Lite\" -c.appId=com.pdfeditor.lite -c.extraMetadata.name=pdf-editor-lite -c.extraMetadata.productName=\"PDF Editor Lite\" -c.nsis.shortcutName=\"PDF Editor Lite\" -c.nsis.artifactName=\"PDF-Editor-Lite-Setup-\\${version}.exe\" -c.portable.artifactName=\"PDF-Editor-Lite-Portable-\\${version}.exe\" -c.portable.splashImage=build/splash-lite.bmp",
     "start:lite": "npm run prepare-app:lite && electron ."
   },
   "devDependencies": {
@@ -63,7 +63,8 @@
       "artifactName": "PDF-Editor-Setup-${version}.exe"
     },
     "portable": {
-      "artifactName": "PDF-Editor-Portable-${version}.exe"
+      "artifactName": "PDF-Editor-Portable-${version}.exe",
+      "splashImage": "build/splash.bmp"
     },
     "linux": {
       "target": [
