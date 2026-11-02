@@ -48,3 +48,11 @@ The installers appear in `desktop/dist`. `npm run prepare-app` (run automaticall
 - `preload.js`: the small, safe bridge between the shell and the editor page.
 - `scripts/prepare-app.js`: copies the editor into `app/`.
 - `build/`: app icons.
+
+## PDF Editor Lite
+
+The same app without text recognition (OCR): everything else is identical (editing, converting, compressing, passwords, signatures). Scanned PDFs can still be opened, viewed, annotated, split and compressed, but their text can't be read, edited or converted. It installs alongside the full app, with its own name and shortcut.
+
+Build it with `npm run dist:win:lite` (`PDF-Editor-Lite-Setup-1.0.0.exe` and `PDF-Editor-Lite-Portable-1.0.0.exe`), or try it with `npm run start:lite`. It is about 10 MB smaller; most of the size is Electron itself.
+
+**Speed tip:** the installed app starts in a few seconds. The portable `.exe` unpacks itself into a temporary folder every time it starts, which takes 10–60 seconds depending on the computer (and on the antivirus scanning it), so use the installer if you can.

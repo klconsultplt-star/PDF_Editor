@@ -15,7 +15,7 @@ Also in this repository, to save any web page as a PDF exactly as it looks on sc
 
 ## How to run it
 
-**Desktop app (recommended):** install the Windows app (`PDF-Editor-Setup-1.0.0.exe`) or use the portable `.exe`. It opens PDFs from Windows ("Open with", double-click), has real Open/Save windows and a menu bar, and works fully offline, including text recognition. See [`desktop/README.md`](desktop/README.md) for installing and for building Windows, Mac and Linux versions.
+**Desktop app (recommended):** install the Windows app (`PDF-Editor-Setup-1.0.0.exe`) or use the portable `.exe`. It opens PDFs from Windows ("Open with", double-click), has real Open/Save windows and a menu bar, and works fully offline, including text recognition. See [`desktop/README.md`](desktop/README.md) for installing and for building Windows, Mac and Linux versions. **PDF Editor Lite** is the same app without text recognition (OCR).
 
 **One file:** download [`dist/pdf-editor.html`](dist/pdf-editor.html) (on GitHub, open the file and click the **Download raw file** button), save it anywhere, and double-click it. It contains the whole editor and works offline.
 

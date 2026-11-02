@@ -12,7 +12,10 @@
     "start": "npm run prepare-app && electron .",
     "dist:win": "npm run prepare-app && electron-builder --win",
     "dist:mac": "npm run prepare-app && electron-builder --mac --x64 --arm64",
-    "dist:linux": "npm run prepare-app && electron-builder --linux"
+    "dist:linux": "npm run prepare-app && electron-builder --linux",
+    "prepare-app:lite": "node scripts/prepare-app.js --lite",
+    "dist:win:lite": "npm run prepare-app:lite && electron-builder --win -c.productName=\"PDF Editor Lite\" -c.appId=com.pdfeditor.lite -c.extraMetadata.name=pdf-editor-lite -c.extraMetadata.productName=\"PDF Editor Lite\" -c.nsis.shortcutName=\"PDF Editor Lite\" -c.nsis.artifactName=\"PDF-Editor-Lite-Setup-\\${version}.exe\" -c.portable.artifactName=\"PDF-Editor-Lite-Portable-\\${version}.exe\"",
+    "start:lite": "npm run prepare-app:lite && electron ."
   },
   "devDependencies": {
     "electron": "38.8.6",

@@ -15,6 +15,9 @@ const fs = require('node:fs');
 const { pathToFileURL } = require('node:url');
 
 const APP_DIR = path.join(__dirname, 'app');
+// PDF Editor Lite is built without text recognition (OCR).
+const HAS_OCR = fs.existsSync(path.join(APP_DIR, 'ocr.js'));
+const NAME = HAS_OCR ? 'PDF Editor' : 'PDF Editor Lite';
 const START_URL = 'app://editor/index.html';
 
 // The editor is served from app://editor/… rather than file://, so that it
@@ -61,7 +64,7 @@ function createWindow() {
     height: 900,
     minWidth: 800,
     minHeight: 500,
-    title: 'PDF Editor',
+    title: NAME,
     icon: path.join(__dirname, 'build', 'icon.png'),
     backgroundColor: '#eef0f3',
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, sandbox: true, nodeIntegration: false, spellcheck: true },
@@ -146,7 +149,7 @@ function buildMenu() {
         { type: 'separator' },
         { label: 'Save as…', accelerator: 'CmdOrCtrl+S', click: send('save') },
         { label: 'Convert to Word, Excel or ODF…', accelerator: 'CmdOrCtrl+E', click: send('convert') },
-        { label: 'Recognize text (OCR)…', click: send('ocr') },
+        ...(HAS_OCR ? [{ label: 'Recognize text (OCR)…', click: send('ocr') }] : []),
         { label: 'Split or extract pages…', click: send('split') },
         { label: 'Compress (make smaller)…', click: send('compress') },
         { label: 'Password…', click: send('password') },
@@ -181,10 +184,10 @@ function buildMenu() {
       label: '&Help',
       submenu: [
         {
-          label: 'About PDF Editor',
+          label: 'About ' + NAME,
           click: () => dialog.showMessageBox(win, {
-            title: 'About PDF Editor',
-            message: `PDF Editor ${app.getVersion()}`,
+            title: 'About ' + NAME,
+            message: `${NAME} ${app.getVersion()}`,
             detail: 'Edit, sign, convert and recognize text in PDF files. Everything runs on this computer; nothing is uploaded.\n\n' +
               'Built with pdf.js, pdf-lib, qpdf and Tesseract (open-source; licences are in the app folder under vendor).',
           }),

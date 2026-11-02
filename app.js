@@ -33,6 +33,8 @@
     return `${f.italic ? 'italic ' : ''}${f.bold ? 'bold ' : ''}${size}px ${f.css}`;
   };
   const isText = (a) => a && (a.type === 'text' || a.type === 'replace');
+  // PDF Editor Lite is built without text recognition (no ocr.js).
+  const HAS_OCR = !!window.PdfOcr;
   const WATERMARK = { text: 'DRAFT', size: 150, opacity: 0.1, angle: 45, font: 'HelveticaBold', color: '#000000' };
 
   // ---------- State ----------
@@ -306,18 +308,19 @@
       strokeCache.clear();
       pages = loaded.pages;
       fileName = file.name;
-      document.title = file.name + ' – PDF Editor';
+      document.title = file.name + (HAS_OCR ? ' – PDF Editor' : ' – PDF Editor Lite');
       savePassword = loaded.password; // a locked file stays locked when downloaded
       updatePasswordButton();
       undoStack = []; redoStack = []; dirty = false; selection = null;
       zoom = fitZoom();
       renderAll();
       const n = `${pages.length} page${pages.length === 1 ? '' : 's'}`;
-      const scanned = pages.filter(needsOcr).length;
+      const scanned = pages.filter(isScanned).length;
+      const scanNote = HAS_OCR ? 'click Recognize text to make it searchable and convertible.' : 'its text is a picture, which PDF Editor Lite can\'t read (the full PDF Editor can).';
       status(loaded.password
         ? `Opened ${file.name} (${n}). It's password protected: the downloaded copy keeps the same password (change it with the Password button).`
         : scanned
-          ? `Opened ${file.name} (${n}). ${scanned === pages.length ? 'It is scanned' : scanned + ' page' + (scanned === 1 ? ' is' : 's are') + ' scanned'}: click Recognize text to make it searchable and convertible.`
+          ? `Opened ${file.name} (${n}). ${scanned === pages.length ? 'It is scanned' : scanned + ' page' + (scanned === 1 ? ' is' : 's are') + ' scanned'}: ${scanNote}`
           : `Opened ${file.name} (${n})`, loaded.password || scanned ? 7000 : 2500);
     } catch (err) {
       if (err instanceof Cancelled) return status('Opening cancelled');
@@ -1332,8 +1335,10 @@
     }
     const ch = chunkAt(await pageChunksAsync(page), x, y);
     if (!ch) {
-      if (needsOcr(page)) {
-        return status('This page is scanned (the text is a picture). Click Recognize text first; then you can edit its text.', 6000);
+      if (isScanned(page)) {
+        return status(HAS_OCR
+          ? 'This page is scanned (the text is a picture). Click Recognize text first; then you can edit its text.'
+          : 'This page is scanned (the text is a picture). Use Whiteout and Add text here; the full PDF Editor can recognize the text.', 6000);
       }
       return status('Click directly on a word or line of text to edit it.', 5000);
     }
@@ -2010,9 +2015,12 @@
   // text) and documents made only of blank pages have none.
   // A page needs OCR when it comes from a PDF but has no real text (a scan)
   // and hasn't been recognised yet.
-  const needsOcr = (p) => p.src != null && !sources[p.src].textPages.has(p.srcPage) && !ocrLayers.has(p.id);
+  const isScanned = (p) => p.src != null && !sources[p.src].textPages.has(p.srcPage) && !ocrLayers.has(p.id);
+  const needsOcr = (p) => HAS_OCR && isScanned(p);
   const hasText = () => pages.some((p) => (p.src != null && sources[p.src].textPages.has(p.srcPage)) || ocrLayers.has(p.id));
-  const NO_TEXT = 'Converting needs a PDF with text. This one has none: if it is scanned, click Recognize text first.';
+  const NO_TEXT = HAS_OCR
+    ? 'Converting needs a PDF with text. This one has none: if it is scanned, click Recognize text first.'
+    : 'Converting needs a PDF with text. This one has none (it may be scanned): PDF Editor Lite can\'t read scanned pages; the full PDF Editor can.';
 
   function updateConvertButton() {
     const btn = $('convertBtn');
@@ -2020,6 +2028,7 @@
     btn.disabled = !hasText() && !scanned;
     btn.title = !pages.length || hasText() || scanned ? 'Convert to Word, Excel or OpenDocument' : NO_TEXT;
     const ocr = $('ocrBtn');
+    ocr.style.display = HAS_OCR ? '' : 'none';
     ocr.disabled = !scanned;
     ocr.textContent = scanned || !pages.some((p) => ocrLayers.has(p.id)) ? 'Recognize text' : '✓ Text recognized';
     ocr.classList.toggle('attention', scanned > 0 && !hasText());
