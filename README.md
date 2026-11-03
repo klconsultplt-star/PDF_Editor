@@ -41,8 +41,9 @@ After changing the app's files, run `python3 build-single-file.py` to rebuild `d
 | Sign | **Sign** (S): draw your signature, type your name in a handwriting style, or upload a photo of it (the white background is removed). Then click where it goes on the page; move and resize it like an image. Signatures are saved in your browser for next time |
 | Move / resize / delete | **Select** tool: drag to move, drag the square handle to resize, Delete key to remove, arrow keys to nudge |
 | Change color, font, size, line width | Toolbar controls. With an item selected, changes apply to it |
-| Rotate, delete, insert blank pages | Hover a page thumbnail on the left |
-| Reorder pages | Drag thumbnails |
+| Organize pages | **Organize pages** (Ctrl+Shift+O in the desktop app) shows all pages in a grid. Click a page to select it, Ctrl+click to add or remove pages, Shift+click for a range, Ctrl+A for all. Then: drag them to a new place, rotate, duplicate, delete (Delete key), insert a blank page or the pages of other PDFs after them, or **Save selected as PDF** to make a new file of just those pages (e.g. `report-pages-1_5_7.pdf`). Undo works for everything. Double-click a page to go back to editing it |
+| Rotate, delete, insert blank pages | Also from a page thumbnail on the left (hover it) |
+| Reorder pages | Drag thumbnails on the left, or in **Organize pages** (several at once) |
 | Merge PDFs | **Merge** adds another PDF's pages to the end |
 | Split or extract pages | **Split**: save chosen pages (for example `1-3, 5, 8-`) as one PDF, or split the document into separate PDFs every N pages (downloaded together as a .zip). Your edits are included |
 | Open locked PDFs | Opening a password-protected PDF asks for its password. The downloaded copy keeps the same password unless you change it |

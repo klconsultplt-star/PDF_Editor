@@ -18,6 +18,7 @@
         Merge
         <input type="file" id="mergeInput" accept="application/pdf,.pdf" multiple hidden>
       </label>
+      <button class="btn" id="organizeBtn" disabled title="See all pages: select, reorder, rotate, delete, insert, or save some as a new PDF">Organize pages</button>
       <button class="btn" id="splitBtn" disabled title="Save some pages as a new PDF, or split into several files">Split</button>
       <span class="combo">
         <input type="text" id="watermarkInput" value="DRAFT" maxlength="60" aria-label="Watermark text" title="Watermark text (DRAFT if left empty)">
@@ -82,6 +83,26 @@
 
   <main class="layout">
     <aside class="sidebar" id="sidebar" aria-label="Pages"></aside>
+    <!-- Organize pages: all pages in a grid -->
+    <section class="organizer" id="organizer" hidden aria-label="Organize pages">
+      <div class="org-bar">
+        <strong>Organize pages</strong>
+        <span class="muted" id="orgInfo"></span>
+        <span class="spacer"></span>
+        <button class="btn" id="orgAll" title="Select all pages (Ctrl+A)">Select all</button>
+        <button class="btn" data-org="rotl" title="Rotate the selected pages left">⟲ Rotate</button>
+        <button class="btn" data-org="rotr" title="Rotate the selected pages right">⟳ Rotate</button>
+        <button class="btn" data-org="dup" title="Copy the selected pages (the copies go after them)">Duplicate</button>
+        <button class="btn" data-org="del" title="Delete the selected pages (Delete key)">Delete</button>
+        <button class="btn" data-org="blank" title="Insert a blank page after the selection (or at the end)">Insert blank page</button>
+        <label class="btn" title="Insert the pages of other PDF files after the selection (or at the end)">Insert from PDF…
+          <input type="file" id="orgInsertInput" accept="application/pdf,.pdf" multiple hidden></label>
+        <button class="btn primary" data-org="save" title="Save the selected pages as a new PDF">Save selected as PDF</button>
+        <button class="btn" id="orgDone" title="Back to editing (Esc)">Done</button>
+      </div>
+      <p class="org-help muted">Click a page to select it, Ctrl+click to add or remove pages, Shift+click to select a range. Drag pages to move them. Double-click a page to edit it.</p>
+      <div class="org-grid" id="orgGrid"></div>
+    </section>
     <section class="viewer" id="viewer">
       <div class="empty" id="emptyState">
         <h1>Edit a PDF in your browser</h1>

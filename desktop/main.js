@@ -150,6 +150,7 @@ function buildMenu() {
         { label: 'Save as…', accelerator: 'CmdOrCtrl+S', click: send('save') },
         { label: 'Convert to Word, Excel or ODF…', accelerator: 'CmdOrCtrl+E', click: send('convert') },
         ...(HAS_OCR ? [{ label: 'Recognize text (OCR)…', click: send('ocr') }] : []),
+        { label: 'Organize pages', accelerator: 'CmdOrCtrl+Shift+O', click: send('organize') },
         { label: 'Split or extract pages…', click: send('split') },
         { label: 'Compress (make smaller)…', click: send('compress') },
         { label: 'Password…', click: send('password') },

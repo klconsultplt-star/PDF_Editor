@@ -188,6 +188,7 @@
       else { drawOverlay(p.id); refreshThumb(p.id); }
     });
     updateButtons();
+    if (orgOpen()) renderOrganizer();
   }
 
   function undo() {
@@ -210,6 +211,7 @@
     $('saveBtn').disabled = !pages.length;
     $('watermarkBtn').disabled = !pages.length;
     $('splitBtn').disabled = !pages.length;
+    $('organizeBtn').disabled = !pages.length;
     $('passwordBtn').disabled = !pages.length;
     updateConvertButton();
     $('zoomLabel').textContent = Math.round(zoom * 100) + '%';
@@ -324,6 +326,8 @@
       loaded.pages.forEach((p) => { p.src = 0; });
       images.clear();
       chunkCache.clear();
+      closeOrganizer();
+      thumbCache.clear();
       paraCache.clear();
       paraSync.clear();
       for (const pv of previews.values()) pv.page.then(() => pv.doc && pv.doc.destroy()).catch(() => {});
@@ -358,20 +362,25 @@
     }
   }
 
-  async function mergeFiles(files) {
-    if (!files.length) return;
+  // Adds the pages of other PDFs at position `at` (default: the end);
+  // returns the new pages.
+  async function mergeFiles(files, at = pages.length) {
+    if (!files.length) return [];
     try {
       const added = [];
       for (const f of files) added.push(...(await loadSource(await readFile(f), f.name)).pages);
       checkpoint();
-      pages.push(...added);
+      pages.splice(Math.min(at, pages.length), 0, ...added);
       if (!fileName || !sources.length) fileName = files[0].name;
+      if (orgOpen()) orgSel = new Set(added.map((p) => p.id));
       renderAll();
       status(`Added ${added.length} page${added.length === 1 ? '' : 's'}`);
+      return added;
     } catch (err) {
-      if (err instanceof Cancelled) return status('Cancelled');
+      if (err instanceof Cancelled) { status('Cancelled'); return []; }
       console.error(err);
       status('Could not add this file: ' + (err.message || err), 5000);
+      return [];
     }
   }
 
@@ -482,6 +491,7 @@
     });
     viewer.dataset.tool = tool;
     updateButtons();
+    if (orgOpen()) renderOrganizer();
   }
 
   // Draws a page into a new canvas and swaps it in when it's ready, so the
@@ -701,20 +711,39 @@
       e.stopPropagation();
       movePage(from, page.id);
     });
-    thumbObserver.observe(t);
+    if (!cachedThumb(t)) thumbObserver.observe(t);
     return t;
   }
 
+  // Thumbnails are kept until their page changes, so reordering or
+  // deleting pages shows them again at once.
+  const thumbCache = new Map(); // "page id:width" -> { key, canvas }
+  const thumbKey = (page) => page.rotation + ':' + JSON.stringify(page.annots);
+  function cachedThumb(t) {
+    const page = pageById(t.dataset.id);
+    const hit = page && thumbCache.get(page.id + ':' + (t.dataset.w || THUMB_WIDTH));
+    if (!hit || hit.key !== thumbKey(page)) return false;
+    const c = t.querySelector('canvas');
+    c.width = hit.canvas.width; c.height = hit.canvas.height;
+    c.getContext('2d').drawImage(hit.canvas, 0, 0);
+    return true;
+  }
   async function renderThumb(t) {
     const page = pageById(t.dataset.id);
-    if (!page) return;
+    if (!page || cachedThumb(t)) return;
     const c = t.querySelector('canvas');
-    const scale = (THUMB_WIDTH * DPR) / viewportFor(page, 1).width;
+    const width = +t.dataset.w || THUMB_WIDTH;
+    const scale = (width * DPR) / viewportFor(page, 1).width;
+    const key = thumbKey(page);
     const vp = await paintPage(page, c, scale);
     if (!vp) return;
     const ctx = c.getContext('2d');
     ctx.setTransform(...vp.transform);
     page.annots.forEach((a) => drawAnnot(ctx, a));
+    const copy = document.createElement('canvas');
+    copy.width = c.width; copy.height = c.height;
+    copy.getContext('2d').drawImage(c, 0, 0);
+    thumbCache.set(page.id + ':' + width, { key, canvas: copy });
   }
 
   const thumbTimers = new Map();
@@ -2895,6 +2924,231 @@
     $('compressResults').showModal();
   }
 
+
+  // ---------- Organize pages ----------
+  // All pages in a grid: select some (click, Ctrl+click, Shift+click), then
+  // move them by dragging, rotate, duplicate, delete, insert pages before or
+  // after them, or save them as a new PDF. Every change can be undone.
+  const ORG_WIDTH = 170;
+  let orgSel = new Set(); // selected page ids
+  let orgAnchor = null;   // where a Shift+click range starts
+  const orgOpen = () => !$('organizer').hidden;
+  const orgObserver = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (e.isIntersecting) thumbQueue.add(e.target); else thumbQueue.delete(e.target);
+    }
+    setTimeout(drainThumbs, 50);
+  }, { root: $('orgGrid'), rootMargin: '600px 0px' });
+
+  function openOrganizer() {
+    if (!pages.length) return;
+    closeTextEditor();
+    orgSel = new Set(currentPageId ? [currentPageId] : []);
+    orgAnchor = currentPageId;
+    $('organizer').hidden = false;
+    renderOrganizer();
+    const cur = $('orgGrid').querySelector('.org-tile.selected');
+    if (cur) cur.scrollIntoView({ block: 'center' });
+  }
+
+  function closeOrganizer() {
+    $('organizer').hidden = true;
+    orgObserver.disconnect();
+  }
+
+  // Selected pages, in document order.
+  const orgSelected = () => pages.filter((p) => orgSel.has(p.id));
+  // Where inserted pages go: after the last selected page, or at the end.
+  const orgInsertAt = () => {
+    const idx = pages.map((p, i) => (orgSel.has(p.id) ? i : -1)).filter((i) => i >= 0);
+    return idx.length ? Math.max(...idx) + 1 : pages.length;
+  };
+
+  function renderOrganizer() {
+    const grid = $('orgGrid');
+    orgObserver.disconnect();
+    grid.querySelectorAll('.org-tile').forEach((t) => thumbQueue.delete(t));
+    grid.innerHTML = '';
+    orgSel = new Set([...orgSel].filter((id) => pages.some((p) => p.id === id)));
+    pages.forEach((page, i) => {
+      const t = document.createElement('div');
+      t.className = 'org-tile';
+      t.dataset.id = page.id;
+      t.dataset.w = ORG_WIDTH;
+      t.draggable = true;
+      t.innerHTML = `<canvas></canvas><div class="num">${i + 1}</div>`;
+      const v = viewportFor(page, 1);
+      const c = t.querySelector('canvas');
+      c.style.width = ORG_WIDTH + 'px';
+      c.style.height = (ORG_WIDTH * v.height) / v.width + 'px';
+      grid.appendChild(t);
+      if (!cachedThumb(t)) orgObserver.observe(t);
+    });
+    updateOrgSelection();
+  }
+
+  function updateOrgSelection() {
+    $('orgGrid').querySelectorAll('.org-tile').forEach((t) => t.classList.toggle('selected', orgSel.has(t.dataset.id)));
+    const n = orgSel.size;
+    $('orgInfo').textContent = `${pages.length} page${pages.length === 1 ? '' : 's'} · ${n ? n + ' selected' : 'none selected'}`;
+    $('organizer').querySelectorAll('[data-org=rotl],[data-org=rotr],[data-org=dup],[data-org=del],[data-org=save]').forEach((b) => { b.disabled = !n; });
+  }
+
+  // "1-3, 5" style list of page numbers (1-based).
+  function rangesOf(numbers) {
+    const out = [];
+    for (let i = 0; i < numbers.length; i++) {
+      let j = i;
+      while (j + 1 < numbers.length && numbers[j + 1] === numbers[j] + 1) j++;
+      out.push(i === j ? String(numbers[i]) : `${numbers[i]}-${numbers[j]}`);
+      i = j;
+    }
+    return out.join(', ');
+  }
+
+  async function orgAction(act) {
+    const sel = orgSelected();
+    if (act === 'rotl' || act === 'rotr') {
+      if (!sel.length) return;
+      checkpoint();
+      for (const p of sel) p.rotation = (p.rotation + (act === 'rotr' ? 90 : 270)) % 360;
+      renderAll();
+    } else if (act === 'del') {
+      if (!sel.length) return;
+      if (sel.length === pages.length) return status('A PDF needs at least one page: keep at least one.', 4000);
+      checkpoint();
+      const after = pages.findIndex((p) => orgSel.has(p.id));
+      pages = pages.filter((p) => !orgSel.has(p.id));
+      const next = pages[Math.min(after, pages.length - 1)];
+      orgSel = new Set(next ? [next.id] : []);
+      orgAnchor = next && next.id;
+      renderAll();
+      status(`Deleted ${sel.length} page${sel.length === 1 ? '' : 's'} (Undo brings ${sel.length === 1 ? 'it' : 'them'} back)`, 4000);
+    } else if (act === 'dup') {
+      if (!sel.length) return;
+      checkpoint();
+      const copies = sel.map((p) => {
+        const copy = { ...JSON.parse(JSON.stringify(p)), id: uid() };
+        if (ocrLayers.has(p.id)) ocrLayers.set(copy.id, ocrLayers.get(p.id));
+        return copy;
+      });
+      pages.splice(orgInsertAt(), 0, ...copies);
+      orgSel = new Set(copies.map((p) => p.id));
+      renderAll();
+    } else if (act === 'blank') {
+      checkpoint();
+      const at = orgInsertAt();
+      const near = pages[Math.max(0, at - 1)];
+      const v = near.view;
+      const blank = { id: uid(), src: null, srcPage: 0, rotation: near.rotation, view: [0, 0, v[2] - v[0], v[3] - v[1]], annots: [] };
+      pages.splice(at, 0, blank);
+      orgSel = new Set([blank.id]);
+      orgAnchor = blank.id;
+      renderAll();
+    } else if (act === 'save') {
+      if (!sel.length) return;
+      const numbers = pages.map((p, i) => (orgSel.has(p.id) ? i + 1 : 0)).filter(Boolean);
+      const label = rangesOf(numbers).replace(/\s/g, '').replace(/,/g, '_').slice(0, 40);
+      const name = `${baseName()}-${numbers.length === 1 ? 'page' : 'pages'}-${label}.pdf`;
+      status('Creating PDF…', 30000);
+      try {
+        const bytes = await protect(await buildPdf({ list: sel }));
+        downloadBlob(new Blob([bytes], { type: 'application/pdf' }), name);
+        status(`${DONE} ${name} (${sel.length} page${sel.length === 1 ? '' : 's'}: ${rangesOf(numbers)})`, 6000);
+      } catch (err) {
+        console.error(err);
+        status('Could not save the pages: ' + (err.message || err), 6000);
+      }
+    }
+  }
+
+  // Selecting with the mouse.
+  $('orgGrid').addEventListener('click', (e) => {
+    const t = e.target.closest('.org-tile');
+    if (!t) { if (e.target === $('orgGrid')) { orgSel.clear(); updateOrgSelection(); } return; }
+    const id = t.dataset.id;
+    if (e.shiftKey && orgAnchor && pages.some((p) => p.id === orgAnchor)) {
+      const a = pages.findIndex((p) => p.id === orgAnchor), b = pages.findIndex((p) => p.id === id);
+      const [lo, hi] = a < b ? [a, b] : [b, a];
+      if (!(e.ctrlKey || e.metaKey)) orgSel.clear();
+      for (let i = lo; i <= hi; i++) orgSel.add(pages[i].id);
+    } else if (e.ctrlKey || e.metaKey) {
+      if (orgSel.has(id)) orgSel.delete(id); else orgSel.add(id);
+      orgAnchor = id;
+    } else {
+      orgSel = new Set([id]);
+      orgAnchor = id;
+    }
+    updateOrgSelection();
+  });
+  // Double-click: back to editing, at that page.
+  $('orgGrid').addEventListener('dblclick', (e) => {
+    const t = e.target.closest('.org-tile');
+    if (!t) return;
+    closeOrganizer();
+    currentPageId = t.dataset.id;
+    const el = pageEl(t.dataset.id);
+    if (el) el.scrollIntoView({ block: 'start' });
+  });
+
+  // Moving pages by dragging (all selected pages move together).
+  let orgDrag = null;
+  const clearDropMarks = () => $('orgGrid').querySelectorAll('.drop-before,.drop-after').forEach((x) => x.classList.remove('drop-before', 'drop-after'));
+  $('orgGrid').addEventListener('dragstart', (e) => {
+    const t = e.target.closest('.org-tile');
+    if (!t) return;
+    if (!orgSel.has(t.dataset.id)) { orgSel = new Set([t.dataset.id]); orgAnchor = t.dataset.id; updateOrgSelection(); }
+    orgDrag = { ids: orgSelected().map((p) => p.id) };
+    e.dataTransfer.setData('text/x-org', '1');
+    e.dataTransfer.effectAllowed = 'move';
+    setTimeout(() => $('orgGrid').querySelectorAll('.org-tile.selected').forEach((x) => x.classList.add('dragging')), 0);
+  });
+  const dropTarget = (e) => {
+    const t = e.target.closest('.org-tile');
+    if (!t) return null;
+    const r = t.getBoundingClientRect();
+    return { id: t.dataset.id, after: e.clientX > r.left + r.width / 2, el: t };
+  };
+  $('orgGrid').addEventListener('dragover', (e) => {
+    if (!orgDrag) return;
+    e.preventDefault();
+    clearDropMarks();
+    const d = dropTarget(e);
+    if (d) d.el.classList.add(d.after ? 'drop-after' : 'drop-before');
+  });
+  $('orgGrid').addEventListener('dragend', () => {
+    orgDrag = null;
+    clearDropMarks();
+    $('orgGrid').querySelectorAll('.dragging').forEach((x) => x.classList.remove('dragging'));
+  });
+  $('orgGrid').addEventListener('drop', (e) => {
+    if (!orgDrag) return;
+    e.preventDefault();
+    const d = dropTarget(e);
+    const moving = pages.filter((p) => orgDrag.ids.includes(p.id));
+    orgDrag = null;
+    clearDropMarks();
+    if (d && orgSel.has(d.id)) return renderOrganizer(); // dropped onto itself
+    const rest = pages.filter((p) => !moving.includes(p));
+    let at = rest.length; // empty space after the last page: the end
+    if (d) { at = rest.findIndex((p) => p.id === d.id); if (d.after) at++; }
+    const order = [...rest.slice(0, at), ...moving, ...rest.slice(at)];
+    if (order.every((p, i) => p === pages[i])) return renderOrganizer();
+    checkpoint();
+    pages = order;
+    renderAll();
+  });
+
+  $('organizeBtn').addEventListener('click', openOrganizer);
+  $('orgDone').addEventListener('click', closeOrganizer);
+  $('orgAll').addEventListener('click', () => { orgSel = new Set(pages.map((p) => p.id)); updateOrgSelection(); });
+  $('organizer').querySelectorAll('[data-org]').forEach((b) => b.addEventListener('click', () => orgAction(b.dataset.org)));
+  $('orgInsertInput').addEventListener('change', (e) => {
+    const files = [...e.target.files].filter((f) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name));
+    e.target.value = '';
+    if (files.length) mergeFiles(files, orgInsertAt());
+  });
+
   // ---------- Password for downloads ----------
   function updatePasswordButton() {
     const btn = $('passwordBtn');
@@ -3020,6 +3274,15 @@
   document.addEventListener('keydown', (e) => {
     const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName);
     const mod = e.ctrlKey || e.metaKey;
+    if (orgOpen() && !typing && !document.querySelector('dialog[open]')) {
+      if (e.key === 'Escape') { e.preventDefault(); closeOrganizer(); return; }
+      if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); orgAction('del'); return; }
+      if (mod && e.key.toLowerCase() === 'a') { e.preventDefault(); orgSel = new Set(pages.map((p) => p.id)); updateOrgSelection(); return; }
+      if (mod && e.key.toLowerCase() === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
+      if (mod && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); return; }
+      if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); save(); return; }
+      return; // editing tools don't apply here
+    }
     if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); save(); return; }
     if (typing) return;
     if (mod && e.key.toLowerCase() === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
@@ -3123,6 +3386,7 @@
       convert: openConvertDialog,
       ocr: () => openOcrDialog(),
       split: openSplitDialog,
+      organize: () => (orgOpen() ? closeOrganizer() : openOrganizer()),
       compress: openCompressDialog,
       password: openPasswordDialog,
       sign: startSignature,
