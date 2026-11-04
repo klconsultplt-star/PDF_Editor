@@ -45,11 +45,10 @@ jobs:
             desktop/dist/*.AppImage
           if-no-files-found: error
 
-  # Pushing a tag like desktop-v1.2.0 also publishes the two portable Windows
-  # apps (PDF Editor and PDF Editor Lite) as a GitHub Release, so they have
-  # permanent download links.
+  # Also publishes the two portable Windows apps (PDF Editor and PDF Editor
+  # Lite) as a GitHub Release named after the app version (desktop-v1.2.0),
+  # so they have permanent download links.
   release-windows:
-    if: startsWith(github.ref, 'refs/tags/desktop-v')
     runs-on: windows-latest
     permissions:
       contents: write
@@ -65,6 +64,8 @@ jobs:
           cache: npm
           cache-dependency-path: desktop/package-lock.json
       - run: npm ci
+      - id: v
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
       - name: PDF Editor (portable)
         run: npm run prepare-app && npx electron-builder --win portable --publish never
         env:
@@ -80,7 +81,9 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
       - uses: softprops/action-gh-release@v2
         with:
-          name: PDF Editor ${{ github.ref_name }}
+          tag_name: desktop-v${{ steps.v.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: PDF Editor ${{ steps.v.outputs.version }}
           body: |
             Portable Windows apps: download, then double-click to run (nothing to install).
             - **PDF-Editor-Portable** – the full app, with text recognition (OCR).
